@@ -1,0 +1,14 @@
+{
+  "name": "artemis",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "dev:frontend": "pnpm --filter frontend dev",
+    "dev:backend": "pnpm --filter backend dev"
+  },
+  "keywords": [],
+  "author": "Riccardo Saro",
+  "license": "ISC",
+  "packageManager": "pnpm@10.22.0"
+}
