@@ -42,3 +42,20 @@
 - Database: SQLite (via Prisma o query raw)
 - Package manager: pnpm (monorepo: apps + packages)
 - AI: OpenAI API per Intent Engine e, in futuro, suggerimenti GenUI
+
+
+## Project Structure
+artemis/
+  apps/
+    frontend/        # Next.js app
+    backend/         # Node.js/Express/Fastify orchestrator API
+  packages/
+    shared/          # tipi TypeScript condivisi, DSL GenUI, ecc.
+  docs/
+    ARCHITECTURE.md  
+    INTENTS.md       
+    GENUI_DSL.md     
+  .gitignore
+  package.json
+  pnpm-workspace.yaml
+  README.md
