@@ -19,5 +19,6 @@
   "tailwindCSS.experimental.configFile": null,
   "typescript.tsdk": "./apps/frontend/artemis/node_modules/typescript/lib",
   "typescript.enablePromptUseWorkspaceTsdk": true,
-  "git.ignoreLimitWarning": true
+  "git.ignoreLimitWarning": true,
+  "postman.settings.dotenv-detection-notification-visibility": false
 }

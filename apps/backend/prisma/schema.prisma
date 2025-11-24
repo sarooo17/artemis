@@ -1,0 +1,95 @@
+// Prisma schema for Artemis
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// Company model
+model Company {
+  id        String   @id @default(uuid())
+  name      String
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  
+  // Relations
+  users User[]
+  
+  @@map("companies")
+}
+
+// User model with auth fields
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  hashedPassword String @map("hashed_password")
+  firstName String   @default("User") @map("first_name")
+  lastName  String   @default("") @map("last_name")
+  role      String   @default("User")
+  companyId String?  @map("company_id")
+  
+  // MFA fields (for future implementation)
+  isTwoFactorEnabled Boolean @default(false) @map("is_two_factor_enabled")
+  twoFactorSecret    String? @map("two_factor_secret")
+  
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  
+  // Relations
+  company       Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  chatSessions  ChatSession[]
+  refreshTokens RefreshToken[]
+  
+  @@index([companyId])
+  @@map("users")
+}
+
+// Refresh tokens for JWT rotation
+model RefreshToken {
+  id        String   @id @default(uuid())
+  token     String   @unique
+  userId    String   @map("user_id")
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@index([userId])
+  @@index([token])
+  @@map("refresh_tokens")
+}
+
+// Chat sessions associated with users
+model ChatSession {
+  id        String   @id @default(uuid())
+  userId    String?  @map("user_id") // nullable for anonymous sessions
+  tempSessionId String? @map("temp_session_id") // for anonymous tracking before login
+  title     String?
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages ChatMessage[]
+  
+  @@index([userId])
+  @@index([tempSessionId])
+  @@map("chat_sessions")
+}
+
+// Chat messages
+model ChatMessage {
+  id            String   @id @default(uuid())
+  sessionId     String   @map("session_id")
+  role          String   // "user" or "assistant"
+  content       String   @db.Text
+  createdAt     DateTime @default(now()) @map("created_at")
+  
+  session ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  
+  @@index([sessionId])
+  @@map("chat_messages")
+}
