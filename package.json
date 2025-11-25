@@ -4,8 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "dev:frontend": "pnpm --filter artemis dev",
-    "dev:backend": "pnpm --filter backend dev"
+    "dev:frontend": "pnpm --filter @artemis/frontend dev",
+    "dev:backend": "pnpm --filter @artemis/backend dev"
   },
   "keywords": [],
   "author": "Riccardo Saro",

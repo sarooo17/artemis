@@ -11,14 +11,27 @@ datasource db {
 
 // Company model
 model Company {
-  id        String   @id @default(uuid())
-  name      String
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
+  id              String   @id @default(uuid())
+  name            String
+  vatNumber       String?  @unique @map("vat_number")
+  domain          String?  @unique // company email domain (e.g., "acme.com")
+  logo            String?  @db.Text
+  address         String?  @db.Text
+  sector          String?
+  language        String   @default("en")
+  currency        String   @default("EUR")
+  employeeCount   String?  @map("employee_count") // "1-10", "11-50", "51-200", "201-500", "500+"
+  billingPlanId   String?  @map("billing_plan_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
   
   // Relations
-  users User[]
+  users         User[]
+  billingPlan   BillingPlan? @relation(fields: [billingPlanId], references: [id])
+  departments   Department[]
+  inviteLinks   InviteLink[]
   
+  @@index([billingPlanId])
   @@map("companies")
 }
 
@@ -26,11 +39,16 @@ model Company {
 model User {
   id        String   @id @default(uuid())
   email     String   @unique
-  hashedPassword String @map("hashed_password")
-  firstName String   @default("User") @map("first_name")
-  lastName  String   @default("") @map("last_name")
-  role      String   @default("User")
+  hashedPassword String? @map("hashed_password") // nullable for OTP-only users
+  firstName String?  @map("first_name")
+  lastName  String?  @map("last_name")
+  phoneNumber String? @map("phone_number")
+  avatar    String?  @db.Text
+  roleId    String?  @map("role_id")
   companyId String?  @map("company_id")
+  isCompanyOwner Boolean @default(false) @map("is_company_owner")
+  isEmailVerified Boolean @default(false) @map("is_email_verified")
+  onboardingCompleted Boolean @default(false) @map("onboarding_completed")
   
   // MFA fields (for future implementation)
   isTwoFactorEnabled Boolean @default(false) @map("is_two_factor_enabled")
@@ -41,11 +59,65 @@ model User {
   
   // Relations
   company       Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  role          Role? @relation(fields: [roleId], references: [id], onDelete: SetNull)
   chatSessions  ChatSession[]
   refreshTokens RefreshToken[]
+  fluentisIntegrations FluentisIntegration[]
+  settings      UserSettings?
+  dashboardCategories DashboardCategory[]
+  dashboards    Dashboard[]
   
   @@index([companyId])
+  @@index([roleId])
   @@map("users")
+}
+
+// User Settings
+model UserSettings {
+  id                    String   @id @default(uuid())
+  userId                String   @unique @map("user_id")
+  
+  // General Settings
+  language              String   @default("en")
+  timezone              String   @default("UTC")
+  dateFormat            String   @default("DD/MM/YYYY") @map("date_format")
+  timeFormat            String   @default("24h") @map("time_format")
+  
+  // Personalization
+  theme                 String   @default("light") // light, dark, auto
+  accentColor           String   @default("#3B82F6") @map("accent_color")
+  fontSize              String   @default("medium") @map("font_size") // small, medium, large
+  sidebarCollapsed      Boolean  @default(false) @map("sidebar_collapsed")
+  
+  // Notifications
+  emailNotifications    Boolean  @default(true) @map("email_notifications")
+  pushNotifications     Boolean  @default(true) @map("push_notifications")
+  notifyOnMentions      Boolean  @default(true) @map("notify_on_mentions")
+  notifyOnWorkflowComplete Boolean @default(true) @map("notify_on_workflow_complete")
+  notifyOnTeamUpdates   Boolean  @default(true) @map("notify_on_team_updates")
+  digestFrequency       String   @default("daily") @map("digest_frequency") // never, daily, weekly
+  
+  createdAt             DateTime @default(now()) @map("created_at")
+  updatedAt             DateTime @updatedAt @map("updated_at")
+  
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@map("user_settings")
+}
+
+// Security Audit Log
+model SecurityAuditLog {
+  id          String   @id @default(uuid())
+  userId      String   @map("user_id")
+  action      String   // "login", "logout", "password_change", "2fa_enable", "2fa_disable", etc.
+  ipAddress   String?  @map("ip_address")
+  userAgent   String?  @map("user_agent") @db.Text
+  metadata    Json?    // additional info
+  createdAt   DateTime @default(now()) @map("created_at")
+  
+  @@index([userId])
+  @@index([createdAt])
+  @@map("security_audit_logs")
 }
 
 // Refresh tokens for JWT rotation
@@ -69,14 +141,18 @@ model ChatSession {
   userId    String?  @map("user_id") // nullable for anonymous sessions
   tempSessionId String? @map("temp_session_id") // for anonymous tracking before login
   title     String?
+  isArchived Boolean @default(false) @map("is_archived") // soft delete
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
   
   user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
   messages ChatMessage[]
+  fluentisIntegrations FluentisIntegration[]
+  dashboardWidgets DashboardWidget[]
   
   @@index([userId])
   @@index([tempSessionId])
+  @@index([userId, isArchived])
   @@map("chat_sessions")
 }
 
@@ -92,4 +168,257 @@ model ChatMessage {
   
   @@index([sessionId])
   @@map("chat_messages")
+}
+
+// Fluentis Integration Workflow
+model FluentisIntegration {
+  id                String   @id @default(uuid())
+  userId            String   @map("user_id")
+  chatSessionId     String?  @map("chat_session_id")
+  flowType          String   @map("flow_type") // "order-to-cash", "procure-to-pay", etc.
+  status            String   @default("pending") // "pending", "in-progress", "completed", "failed", "cancelled"
+  
+  // Input parameters
+  inputData         Json     @map("input_data") // { customerName, itemCode, quantity, etc. }
+  
+  // Fluentis IDs
+  fluentisCustomerId    String?  @map("fluentis_customer_id")
+  fluentisItemId        String?  @map("fluentis_item_id")
+  fluentisOrderId       String?  @map("fluentis_order_id")
+  fluentisDeliveryNoteId String? @map("fluentis_delivery_note_id")
+  fluentisInvoiceId     String?  @map("fluentis_invoice_id")
+  
+  // Execution metadata
+  currentStep       String?  @map("current_step")
+  errorMessage      String?  @map("error_message") @db.Text
+  completedAt       DateTime? @map("completed_at")
+  
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+  
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  chatSession ChatSession? @relation(fields: [chatSessionId], references: [id], onDelete: SetNull)
+  steps FluentisWorkflowStep[]
+  
+  @@index([userId])
+  @@index([chatSessionId])
+  @@index([status])
+  @@map("fluentis_integrations")
+}
+
+// Individual workflow steps
+model FluentisWorkflowStep {
+  id              String   @id @default(uuid())
+  integrationId   String   @map("integration_id")
+  stepName        String   @map("step_name") // "export_customer", "check_stock", "import_sales_order", etc.
+  stepOrder       Int      @map("step_order")
+  status          String   @default("pending") // "pending", "running", "completed", "failed", "skipped"
+  
+  // API call details
+  apiMethod       String?  @map("api_method") // "Export", "Import", "Operation", "Service"
+  apiEndpoint     String?  @map("api_endpoint")
+  requestPayload  Json?    @map("request_payload")
+  responseData    Json?    @map("response_data")
+  
+  // Execution tracking
+  startedAt       DateTime? @map("started_at")
+  completedAt     DateTime? @map("completed_at")
+  errorMessage    String?  @map("error_message") @db.Text
+  retryCount      Int      @default(0) @map("retry_count")
+  
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+  
+  integration FluentisIntegration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  
+  @@index([integrationId])
+  @@index([stepOrder])
+  @@map("fluentis_workflow_steps")
+}
+
+// OTP verification codes
+model OTP {
+  id        String   @id @default(uuid())
+  email     String   
+  code      String   // 6-digit code
+  type      String   // "login", "registration", "team_invite"
+  attempts  Int      @default(0)
+  verified  Boolean  @default(false)
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  
+  @@index([email, code])
+  @@index([expiresAt])
+  @@map("otps")
+}
+
+// Billing Plans
+model BillingPlan {
+  id                String   @id @default(uuid())
+  name              String   @unique
+  description       String   @db.Text
+  priceMonthly      Float    @map("price_monthly")
+  priceYearly       Float    @map("price_yearly")
+  maxUsers          Int      @map("max_users") // -1 for unlimited
+  maxChatSessions   Int      @map("max_chat_sessions") // -1 for unlimited
+  features          Json     // array of feature strings
+  isActive          Boolean  @default(true) @map("is_active")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+  
+  companies Company[]
+  
+  @@map("billing_plans")
+}
+
+// Departments in company
+model Department {
+  id          String   @id @default(uuid())
+  companyId   String   @map("company_id")
+  name        String
+  description String?  @db.Text
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  roles   Role[]
+  
+  @@unique([companyId, name])
+  @@index([companyId])
+  @@map("departments")
+}
+
+// Roles with permissions
+model Role {
+  id            String   @id @default(uuid())
+  departmentId  String   @map("department_id")
+  name          String
+  description   String?  @db.Text
+  maxUsers      Int      @default(-1) @map("max_users") // -1 for unlimited
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+  
+  department    Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  users         User[]
+  permissions   RolePermission[]
+  inviteLinks   InviteLink[]
+  
+  @@unique([departmentId, name])
+  @@index([departmentId])
+  @@map("roles")
+}
+
+// Permissions
+model Permission {
+  id          String   @id @default(uuid())
+  name        String   @unique // "read_chats", "write_chats", "delete_chats", "manage_users", "manage_billing", etc.
+  description String?  @db.Text
+  category    String   // "chats", "users", "billing", "settings", etc.
+  createdAt   DateTime @default(now()) @map("created_at")
+  
+  roles RolePermission[]
+  
+  @@map("permissions")
+}
+
+// Many-to-many relation between Role and Permission
+model RolePermission {
+  roleId      String   @map("role_id")
+  permissionId String  @map("permission_id")
+  
+  role        Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission  Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+  
+  @@id([roleId, permissionId])
+  @@index([roleId])
+  @@index([permissionId])
+  @@map("role_permissions")
+}
+
+// Invite links for team members
+model InviteLink {
+  id            String   @id @default(uuid())
+  companyId     String   @map("company_id")
+  roleId        String   @map("role_id")
+  token         String   @unique
+  allowedEmails Json     @map("allowed_emails") // array of allowed email addresses
+  usedBy        Json     @default("[]") @map("used_by") // array of emails that used this link
+  maxUses       Int      @default(-1) @map("max_uses") // -1 for unlimited (until role maxUsers reached)
+  expiresAt     DateTime @map("expires_at")
+  createdAt     DateTime @default(now()) @map("created_at")
+  
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  role    Role    @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  
+  @@index([companyId])
+  @@index([roleId])
+  @@index([token])
+  @@index([expiresAt])
+  @@map("invite_links")
+}
+
+// Dashboard Categories (like browser tabs)
+model DashboardCategory {
+  id          String   @id @default(uuid())
+  userId      String   @map("user_id")
+  name        String
+  icon        String?  // emoji or icon name
+  order       Int      @default(0) // for ordering tabs
+  isDefault   Boolean  @default(false) @map("is_default") // home/overview category
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  
+  user       User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  dashboards Dashboard[]
+  
+  @@index([userId])
+  @@index([userId, order])
+  @@map("dashboard_categories")
+}
+
+// Individual Dashboard (can contain multiple widgets)
+model Dashboard {
+  id          String   @id @default(uuid())
+  categoryId  String   @map("category_id")
+  userId      String   @map("user_id")
+  name        String
+  description String?  @db.Text
+  layout      Json?    // JSON for grid layout configuration
+  isShared    Boolean  @default(false) @map("is_shared") // if shared with team
+  order       Int      @default(0) // order within category
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  
+  category DashboardCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  user     User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  widgets  DashboardWidget[]
+  
+  @@index([categoryId])
+  @@index([userId])
+  @@index([categoryId, order])
+  @@map("dashboards")
+}
+
+// Individual Widget (chart, metric, table, etc.)
+model DashboardWidget {
+  id            String   @id @default(uuid())
+  dashboardId   String   @map("dashboard_id")
+  chatSessionId String?  @map("chat_session_id") // if saved from AI chat
+  type          String   // 'chart', 'metric', 'table', 'list', 'text'
+  title         String
+  description   String?  @db.Text
+  config        Json     // widget-specific configuration (chart type, colors, etc.)
+  data          Json     // actual data for the widget
+  position      Json     // { x, y, w, h } for grid positioning
+  refreshRate   Int?     @map("refresh_rate") // in seconds, null = manual only
+  lastRefresh   DateTime? @map("last_refresh")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+  
+  dashboard   Dashboard @relation(fields: [dashboardId], references: [id], onDelete: Cascade)
+  chatSession ChatSession? @relation(fields: [chatSessionId], references: [id], onDelete: SetNull)
+  
+  @@index([dashboardId])
+  @@index([chatSessionId])
+  @@map("dashboard_widgets")
 }

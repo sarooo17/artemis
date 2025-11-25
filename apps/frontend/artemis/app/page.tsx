@@ -8,13 +8,59 @@ import Navbar from "@/components/Navbar";
 function HomePage() {
   const router = useRouter();
   const [inputValue, setInputValue] = useState("");
+  const [sending, setSending] = useState(false);
 
-  const handleSendMessage = () => {
-    if (!inputValue.trim()) return;
+  const handleSendMessage = async () => {
+    if (!inputValue.trim() || sending) return;
     
-    const chatId = crypto.randomUUID();
-    sessionStorage.setItem(`chat-${chatId}-initial`, inputValue);
-    router.push(`/chat/${chatId}`);
+    const message = inputValue.trim();
+    setSending(true);
+    
+    try {
+      const token = localStorage.getItem('accessToken');
+      
+      // Create a temporary session ID for immediate redirect
+      const tempId = `temp-${Date.now()}`;
+      
+      // Redirect immediately
+      router.push(`/chat/${tempId}`);
+      
+      // Send the message in the background
+      const response = await fetch('http://localhost:3001/api/chat/send', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ message }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        // Replace the URL with the real session ID
+        router.replace(`/chat/${data.session.id}`);
+      } else {
+        console.error('Failed to send message');
+        // If failed, go back to home
+        router.replace('/');
+        
+        // Handle specific errors
+        if (response.status === 429) {
+          const errorData = await response.json().catch(() => ({}));
+          alert(errorData.error || 'Rate limit exceeded. Please wait a moment and try again.');
+        } else if (response.status === 503) {
+          alert('OpenAI service is temporarily unavailable. Please try again later.');
+        } else {
+          alert('Failed to send message. Please try again.');
+        }
+      }
+    } catch (error) {
+      console.error('Send message error:', error);
+      router.replace('/');
+      alert('Network error. Please check your connection and try again.');
+    } finally {
+      setSending(false);
+    }
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
@@ -50,17 +96,25 @@ function HomePage() {
                       onChange={(e) => setInputValue(e.target.value)}
                       onKeyPress={handleKeyPress}
                       placeholder="Ask for sales review"
-                      className="flex-1 outline-none text-base text-neutral-900 placeholder-neutral-400"
+                      disabled={sending}
+                      className="flex-1 outline-none text-base text-neutral-900 placeholder-neutral-400 disabled:opacity-50"
                     />
                     <button 
                       onClick={handleSendMessage}
-                      className={`w-9 h-9 rounded-full flex items-center cursor-pointer justify-center transition-all ${inputValue ? 'bg-blue-500' : 'bg-blue-100 '}`}
+                      disabled={sending || !inputValue.trim()}
+                      className={`w-9 h-9 rounded-full flex items-center cursor-pointer justify-center transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
+                        sending ? 'bg-blue-400' : inputValue ? 'bg-blue-500' : 'bg-blue-100'
+                      }`}
                     >
-                      <img 
-                        src={inputValue ? "/icon-submit.svg" : "/icon-voice.svg"} 
-                        alt={inputValue ? "Send" : "Voice"} 
-                        className="w-4 h-4 object-contain transition-all" 
-                      />
+                      {sending ? (
+                        <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                      ) : (
+                        <img 
+                          src={inputValue ? "/icon-submit.svg" : "/icon-voice.svg"} 
+                          alt={inputValue ? "Send" : "Voice"} 
+                          className="w-4 h-4 object-contain transition-all" 
+                        />
+                      )}
                     </button>
                   </div>
                 </div>

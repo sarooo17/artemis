@@ -6,13 +6,17 @@ import { env } from './config/env';
 import { prisma } from './config/database';
 import authRoutes from './routes/auth.routes';
 import chatRoutes from './routes/chat.routes';
+import settingsRoutes from './routes/settings.routes';
+import userRoutes from './routes/user.routes';
+import searchRoutes from './routes/search.routes';
+import dashboardRoutes from './routes/dashboard.routes';
 
 const app: Express = express();
 
-// Rate limiting
+// Rate limiting - più permissivo in development
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // limit each IP to 100 requests per windowMs
+  max: env.NODE_ENV === 'production' ? 100 : 1000, // 1000 requests in dev, 100 in production
   message: 'Too many requests from this IP, please try again later.',
 });
 
@@ -34,6 +38,10 @@ app.get('/health', (req: Request, res: Response) => {
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/chat', chatRoutes);
+app.use('/api/settings', settingsRoutes);
+app.use('/api/user', userRoutes);
+app.use('/api/search', searchRoutes);
+app.use('/api/dashboard', dashboardRoutes);
 
 // 404 handler
 app.use((req: Request, res: Response) => {

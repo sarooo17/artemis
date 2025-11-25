@@ -59,15 +59,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       // Load access token from localStorage
       const storedToken = localStorage.getItem('accessToken');
-      if (storedToken) {
-        setAccessToken(storedToken);
+      if (!storedToken) {
+        setIsLoading(false);
+        return;
       }
+      
+      setAccessToken(storedToken);
 
       const response = await fetch('http://localhost:3001/api/auth/me', {
         credentials: 'include',
-        headers: storedToken ? {
+        headers: {
           'Authorization': `Bearer ${storedToken}`,
-        } : {},
+        },
       });
 
       if (response.ok) {
