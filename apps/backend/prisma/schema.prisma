@@ -123,7 +123,7 @@ model SecurityAuditLog {
 // Refresh tokens for JWT rotation
 model RefreshToken {
   id        String   @id @default(uuid())
-  token     String   @unique
+  token     String   @unique @db.VarChar(500)
   userId    String   @map("user_id")
   expiresAt DateTime @map("expires_at")
   createdAt DateTime @default(now()) @map("created_at")
@@ -131,7 +131,6 @@ model RefreshToken {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
   
   @@index([userId])
-  @@index([token])
   @@map("refresh_tokens")
 }
 
