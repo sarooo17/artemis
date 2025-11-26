@@ -36,14 +36,22 @@ export async function authFetch(url: string, options: FetchOptions = {}): Promis
     }
   }
   
-  // Make request with credentials (cookies)
-  const response = await fetch(url.startsWith('http') ? url : `${API_BASE_URL}${url}`, {
-    ...restOptions,
-    headers: requestHeaders,
-    credentials: 'include', // Always include HttpOnly cookies
-  });
-  
-  return response;
+  try {
+    // Make request with credentials (cookies)
+    const response = await fetch(url.startsWith('http') ? url : `${API_BASE_URL}${url}`, {
+      ...restOptions,
+      headers: requestHeaders,
+      credentials: 'include', // Always include HttpOnly cookies
+    });
+    
+    return response;
+  } catch (error) {
+    // Re-throw with additional context
+    if (error instanceof TypeError && error.message === 'Failed to fetch') {
+      throw new Error(`Network error: Unable to reach server at ${API_BASE_URL}`);
+    }
+    throw error;
+  }
 }
 
 /**
@@ -55,4 +63,10 @@ export const api = {
   put: (url: string, body?: any, options?: FetchOptions) => authFetch(url, { ...options, method: 'PUT', body: body ? JSON.stringify(body) : undefined }),
   patch: (url: string, body?: any, options?: FetchOptions) => authFetch(url, { ...options, method: 'PATCH', body: body ? JSON.stringify(body) : undefined }),
   delete: (url: string, options?: FetchOptions) => authFetch(url, { ...options, method: 'DELETE' }),
+  
+  // Chat endpoints
+  chat: {
+    orchestrate: `${API_BASE_URL}/chat/orchestrate`,
+    orchestrateStream: `${API_BASE_URL}/chat/orchestrate/stream`,
+  },
 };

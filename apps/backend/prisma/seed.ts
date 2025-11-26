@@ -248,14 +248,14 @@ async function seedDatabase() {
     const createdUsers = [];
     for (const userData of users) {
       const hashedPassword = await PasswordService.hash(userData.password);
+      const { password, ...userDataWithoutPassword } = userData;
       const user = await prisma.user.create({
         data: {
-          ...userData,
+          ...userDataWithoutPassword,
           hashedPassword,
-          password: undefined,
         },
       });
-      createdUsers.push({ ...user, password: userData.password });
+      createdUsers.push({ ...user, password });
 
       // Create user settings
       await prisma.userSettings.create({

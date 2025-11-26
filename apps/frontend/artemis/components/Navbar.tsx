@@ -243,7 +243,32 @@ export default function Navbar() {
   const handleOpenChatMenu = (e: React.MouseEvent, chatId: string) => {
     e.stopPropagation();
     const rect = (e.target as HTMLElement).getBoundingClientRect();
-    setChatMenuPosition({ x: rect.right + 8, y: rect.top });
+    
+    // Menu dimensions (approximate)
+    const menuHeight = 300; // Approximate height of the menu
+    const menuWidth = 224; // w-56 = 14rem = 224px
+    
+    // Calculate position
+    let x = rect.right + 8;
+    let y = rect.top;
+    
+    // Check if menu would go off bottom of screen
+    if (y + menuHeight > window.innerHeight) {
+      // Flip to show above the button
+      y = rect.bottom - menuHeight;
+      // If still off screen, align to bottom with padding
+      if (y < 0) {
+        y = window.innerHeight - menuHeight - 16;
+      }
+    }
+    
+    // Check if menu would go off right of screen
+    if (x + menuWidth > window.innerWidth) {
+      // Show to the left of the button instead
+      x = rect.left - menuWidth - 8;
+    }
+    
+    setChatMenuPosition({ x, y });
     setChatMenuOpen(chatId);
   };
 
@@ -579,11 +604,11 @@ export default function Navbar() {
 
         {/*Workspaces Container */}
         {isNavExpanded && (
-          <div className="w-full h-full flex flex-col gap-2 mt-8 mb-2">
+          <div className="w-full flex flex-col gap-2 mt-8 mb-2 h-full">
             <p className="text-xs font-extralight tracking-wider text-neutral-400 px-2">
               Workspaces
             </p>
-            <div className="flex flex-col gap-0 w-full h-full bg-neutral-50 rounded-2xl p-1 overflow-auto">
+            <div className="h-full flex flex-col gap-0 w-full bg-neutral-50 rounded-2xl p-1 overflow-y-auto flex-1">
               {workspaces.length === 0 ? (
                 <div className="flex items-center justify-center h-full text-neutral-400 text-sm">
                   No workspaces yet

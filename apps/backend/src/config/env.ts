@@ -31,6 +31,17 @@ const envSchema = z.object({
   
   // OpenAI
   OPENAI_API_KEY: z.string().min(1),
+  
+  // Thesys C1
+  THESYS_API_KEY: z.string().min(1),
+  
+  // Fluentis ERP
+  FLUENTIS_BASE_URL: z.string().url(),
+  FLUENTIS_USER: z.string().min(1),
+  FLUENTIS_PASSWORD: z.string().min(1),
+  FLUENTIS_COMPANY_CODE: z.string().default('1'),
+  FLUENTIS_DEPARTMENT_CODE: z.string().default('1'),
+  FLUENTIS_MOCK_MODE: z.string().transform(val => val === 'true').default('false'),
 });
 
 const parsed = envSchema.safeParse(process.env);

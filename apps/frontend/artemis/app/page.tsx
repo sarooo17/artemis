@@ -18,39 +18,24 @@ function HomePage() {
     setSending(true);
     
     try {
-      // Create a temporary session ID for immediate redirect
-      const tempId = `temp-${Date.now()}`;
-      
-      // Redirect immediately
-      router.push(`/chat/${tempId}`);
-      
-      // Send the message in the background
-      const response = await api.post('/chat/send', { message });
+      // Create a new session in the backend first
+      const response = await api.post('/chat/sessions', {
+        title: message.slice(0, 50) + (message.length > 50 ? '...' : ''),
+      });
 
-      if (response.ok) {
-        const data = await response.json();
-        // Replace the URL with the real session ID
-        router.replace(`/chat/${data.session.id}`);
-      } else {
-        console.error('Failed to send message');
-        // If failed, go back to home
-        router.replace('/');
-        
-        // Handle specific errors
-        if (response.status === 429) {
-          const errorData = await response.json().catch(() => ({}));
-          alert(errorData.error || 'Rate limit exceeded. Please wait a moment and try again.');
-        } else if (response.status === 503) {
-          alert('OpenAI service is temporarily unavailable. Please try again later.');
-        } else {
-          alert('Failed to send message. Please try again.');
-        }
+      if (!response.ok) {
+        throw new Error('Failed to create session');
       }
+
+      const data = await response.json();
+      const sessionId = data.session.id;
+      
+      // Clear input and redirect to the new chat with the message in query
+      setInputValue('');
+      router.push(`/chat/${sessionId}?message=${encodeURIComponent(message)}`);
     } catch (error) {
       console.error('Send message error:', error);
-      router.replace('/');
       alert('Network error. Please check your connection and try again.');
-    } finally {
       setSending(false);
     }
   };

@@ -4,6 +4,7 @@ import { prisma } from '../config/database';
 import { requireAuth, optionalAuth } from '../middleware/auth.middleware';
 import { validateBody } from '../middleware/validation.middleware';
 import { OpenAIService } from '../services/openai.service';
+import { orchestrationService } from '../services/orchestration.service';
 import { sendMessageSchema, forkChatSchema, updateSessionSchema } from '../validators/common.validators';
 
 const router = Router();
@@ -713,6 +714,225 @@ router.get('/search', requireAuth as any, async (req: Request, res: Response): P
   } catch (error) {
     console.error('Search error:', error);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * POST /api/chat/orchestrate
+ * New orchestrated endpoint with OpenAI function calling + Fluentis + C1
+ */
+const orchestrateSchema = z.object({
+  message: z.string().min(1, 'Message is required'),
+  sessionId: z.string().optional(),
+});
+
+/**
+ * POST /api/chat/orchestrate/stream
+ * Streaming version with SSE
+ * NOTE: Must be defined BEFORE /orchestrate to avoid route matching issues
+ */
+router.post('/orchestrate/stream', requireAuth as any, validateBody(orchestrateSchema), async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user?.id;
+    const { message, sessionId } = req.body;
+
+    let session;
+    let conversationHistory: any[] = [];
+
+    // Get or create session
+    if (sessionId) {
+      session = await prisma.chatSession.findFirst({
+        where: {
+          id: sessionId,
+          userId,
+          isArchived: false,
+        },
+        include: {
+          messages: {
+            orderBy: { createdAt: 'asc' },
+            take: 20,
+          },
+        },
+      });
+
+      if (!session) {
+        return res.status(404).json({ error: 'Session not found' });
+      }
+
+      conversationHistory = session.messages.map((msg: any) => ({
+        role: msg.role,
+        content: msg.content,
+      }));
+    } else {
+      session = await prisma.chatSession.create({
+        data: {
+          userId,
+          title: message.slice(0, 50),
+        },
+      });
+    }
+
+    // Save user message
+    const userMessage = await prisma.chatMessage.create({
+      data: {
+        sessionId: session.id,
+        role: 'user',
+        content: message,
+      },
+    });
+
+    // Setup SSE
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    // Send session ID and userMessageId first
+    res.write(`data: ${JSON.stringify({ type: 'session', sessionId: session.id, userMessageId: userMessage.id })}\n\n`);
+
+    let fullContent = '';
+    let responseType = 'text';
+    const toolCalls: any[] = [];
+
+    // Stream orchestration
+    for await (const chunk of orchestrationService.orchestrateStream(message, {
+      conversationHistory,
+      sessionId: session.id,
+    })) {
+      res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+
+      if (chunk.type === 'ui_chunk' || chunk.type === 'text') {
+        fullContent += typeof chunk.content === 'string' ? chunk.content : JSON.stringify(chunk.content);
+      }
+
+      if (chunk.type === 'ui_chunk') {
+        responseType = 'ui';
+      }
+
+      if (chunk.type === 'tool_call') {
+        toolCalls.push(chunk.content);
+      }
+    }
+
+    // Save assistant response
+    await prisma.chatMessage.create({
+      data: {
+        sessionId: session.id,
+        role: 'assistant',
+        content: fullContent,
+        metadata: {
+          type: responseType,
+          toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+        },
+      },
+    });
+
+    // Update session
+    await prisma.chatSession.update({
+      where: { id: session.id },
+      data: { updatedAt: new Date() },
+    });
+
+    res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
+    res.end();
+  } catch (error: any) {
+    console.error('Orchestrate stream error:', error);
+    res.write(`data: ${JSON.stringify({ type: 'error', error: error.message })}\n\n`);
+    res.end();
+  }
+});
+
+/**
+ * POST /api/chat/orchestrate
+ * Non-streaming version (returns full response at once)
+ */
+router.post('/orchestrate', requireAuth as any, validateBody(orchestrateSchema), async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user?.id;
+    const { message, sessionId } = req.body;
+
+    let session;
+    let conversationHistory: any[] = [];
+
+    // Get or create session
+    if (sessionId) {
+      session = await prisma.chatSession.findFirst({
+        where: {
+          id: sessionId,
+          userId,
+          isArchived: false,
+        },
+        include: {
+          messages: {
+            orderBy: { createdAt: 'asc' },
+            take: 20, // Context window: last 20 messages
+          },
+        },
+      });
+
+      if (!session) {
+        return res.status(404).json({ error: 'Session not found' });
+      }
+
+      // Build conversation history
+      conversationHistory = session.messages.map((msg: any) => ({
+        role: msg.role,
+        content: msg.content,
+      }));
+    } else {
+      // Create new session
+      session = await prisma.chatSession.create({
+        data: {
+          userId,
+          title: message.slice(0, 50), // Use first 50 chars as title
+        },
+      });
+    }
+
+    // Save user message
+    await prisma.chatMessage.create({
+      data: {
+        sessionId: session.id,
+        role: 'user',
+        content: message,
+      },
+    });
+
+    // Run orchestration
+    const result = await orchestrationService.orchestrate(message, {
+      conversationHistory,
+      sessionId: session.id,
+    });
+
+    // Save assistant response
+    const assistantMessage = await prisma.chatMessage.create({
+      data: {
+        sessionId: session.id,
+        role: 'assistant',
+        content: result.content,
+        metadata: result.toolCalls ? {
+          type: result.type,
+          toolCalls: result.toolCalls,
+          hasData: !!result.data,
+        } : undefined,
+      },
+    });
+
+    // Update session timestamp
+    await prisma.chatSession.update({
+      where: { id: session.id },
+      data: { updatedAt: new Date() },
+    });
+
+    res.json({
+      sessionId: session.id,
+      message: assistantMessage,
+      type: result.type,
+      toolCalls: result.toolCalls,
+      data: result.data,
+    });
+  } catch (error: any) {
+    console.error('Orchestrate error:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
   }
 });
 

@@ -1,11 +1,13 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter, useParams } from "next/navigation";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import { api } from '@/lib/api';
 import Navbar from "@/components/Navbar";
 import { useAuth } from "@/contexts/AuthContext";
+import C1Renderer from "@/components/C1Renderer";
+import "@crayonai/react-ui/styles/index.css";
 
 type AIResponseBarState = "thinking" | "preview" | "expanded" | "full" | "button" | "hidden";
 
@@ -13,6 +15,7 @@ interface ChatMessage {
   id: string;
   userMessage: string;
   aiResponse: string;
+  responseType: 'text' | 'ui';
   timestamp: Date;
 }
 
@@ -20,6 +23,7 @@ function ChatPageContent() {
   const params = useParams();
   const router = useRouter();
   const [inputValue, setInputValue] = useState("");
+  const initialMessageSentRef = useRef(false);
   
   // AI Response Bar states
   const [aiBarState, setAiBarState] = useState<AIResponseBarState>("hidden");
@@ -32,9 +36,14 @@ function ChatPageContent() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingValue, setEditingValue] = useState("");
+  const [currentResponseType, setCurrentResponseType] = useState<'text' | 'ui'>('text');
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [uiSummaryMessage, setUiSummaryMessage] = useState("");
+  const [streamedAiResponse, setStreamedAiResponse] = useState("");
   
   const autoHideTimerRef = useRef<NodeJS.Timeout | null>(null);
   const barHoverRef = useRef(false);
+  const uiSummaryMessageRef = useRef("");
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const scrollbarTimerRef = useRef<NodeJS.Timeout | null>(null);
   const lastMessageRef = useRef<HTMLDivElement>(null);
@@ -105,14 +114,13 @@ function ChatPageContent() {
 
   // Load chat session from backend
   useEffect(() => {
-    if (params.id) {
-      const sessionId = Array.isArray(params.id) ? params.id[0] : params.id;
-      if (!sessionId.startsWith('temp-')) {
+    if (params.id && typeof window !== 'undefined') {
+      const searchParams = new URLSearchParams(window.location.search);
+      const hasMessage = searchParams.get('message');
+      
+      // Only load existing session if there's no initial message to send
+      if (!hasMessage) {
         loadChatSession();
-      } else {
-        // Show a loading state for temporary ID
-        setAiBarState("thinking");
-        setThinkingMessage("Creating workspace...");
       }
     }
   }, [params.id]);
@@ -134,6 +142,7 @@ function ChatPageContent() {
               id: userMsg.id,
               userMessage: userMsg.content,
               aiResponse: aiMsg.content,
+              responseType: (aiMsg.metadata as any)?.type || 'text',
               timestamp: new Date(userMsg.createdAt),
             });
           }
@@ -146,6 +155,7 @@ function ChatPageContent() {
           const lastMsg = messages[messages.length - 1];
           setCurrentUserMessage(lastMsg.userMessage);
           setCurrentAiResponse(lastMsg.aiResponse);
+          setCurrentResponseType(lastMsg.responseType);
           setAiBarState("preview");
         }
       }
@@ -154,12 +164,14 @@ function ChatPageContent() {
     }
   };
 
-  const handleSendMessage = async () => {
-    if (!inputValue.trim() || isProcessing) return;
+  // Core send message logic - accepts message text directly
+  const sendMessageWithText = useCallback(async (messageText: string) => {
+    if (!messageText.trim() || isProcessing) {
+      return;
+    }
     
-    const userMessage = inputValue;
+    const userMessage = messageText.trim();
     setCurrentUserMessage(userMessage);
-    setInputValue("");
     
     // Se siamo in full mode, rimaniamo in full, altrimenti andiamo in thinking
     const previousState = aiBarState;
@@ -169,12 +181,20 @@ function ChatPageContent() {
     setThinkingMessage("Starting...");
     setShouldScrollToLastMessage(true);
     setIsProcessing(true);
+    setIsStreaming(true);
+    
+    // Reset workspace for new request
+    setStreamedAiResponse("");
+    setUiSummaryMessage("");
+    uiSummaryMessageRef.current = "";
+    setCurrentResponseType('text');
     
     // Create AbortController for this request
     abortControllerRef.current = new AbortController();
     
     try {
-      const response = await api.post('/chat/send/stream', {
+      // Use orchestration endpoint with the current session ID
+      const response = await api.post('/chat/orchestrate/stream', {
         sessionId: params.id,
         message: userMessage,
       }, {
@@ -195,14 +215,21 @@ function ChatPageContent() {
       let streamedResponse = '';
       let sessionId = params.id;
       let userMessageId = '';
+      let responseType: 'text' | 'ui' = 'text';
+      let toolCalls: any[] = [];
+      let buffer = ''; // Buffer for incomplete SSE messages
 
       if (reader) {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
 
-          const chunk = decoder.decode(value);
-          const lines = chunk.split('\n');
+          const chunk = decoder.decode(value, { stream: true });
+          buffer += chunk;
+          const lines = buffer.split('\n');
+          
+          // Keep the last incomplete line in the buffer
+          buffer = lines.pop() || '';
 
           for (const line of lines) {
             if (line.startsWith('data: ')) {
@@ -212,8 +239,9 @@ function ChatPageContent() {
                 if (data.type === 'session') {
                   sessionId = data.sessionId;
                   userMessageId = data.userMessageId;
-                  if (params.id?.toString().startsWith('temp-')) {
-                    router.push(`/chat/${sessionId}`);
+                  // Update URL to remove the message query param after sending
+                  if (typeof window !== 'undefined' && window.location.search.includes('message=')) {
+                    router.replace(`/chat/${sessionId}`, { scroll: false });
                   }
                 } else if (data.type === 'thinking') {
                   // In full mode mostra thinking inline, altrimenti nella bar
@@ -221,26 +249,83 @@ function ChatPageContent() {
                     setAiBarState('thinking');
                   }
                   setThinkingMessage(data.content);
-                } else if (data.type === 'chunk') {
-                  // In full mode rimani in full, altrimenti vai in preview
+                } else if (data.type === 'tool_call') {
+                  // Show which tool is being called
+                  toolCalls.push(data.content);
+                  const toolName = data.content.name;
+                  const friendlyMessages: Record<string, string> = {
+                    'export_sales_orders': 'Sto recuperando i dati delle vendite...',
+                    'get_stock_levels': 'Controllo i livelli di stock...',
+                    'export_items': 'Carico il catalogo prodotti...',
+                    'export_customers': 'Recupero l\'elenco clienti...'
+                  };
+                  setThinkingMessage(friendlyMessages[toolName] || `Sto cercando: ${toolName}...`);
+                } else if (data.type === 'data') {
+                  // Data fetched from Fluentis
+                  setThinkingMessage('Perfetto! Ora creo la visualizzazione per te...');
+                } else if (data.type === 'summary_message') {
+                  // Summary message generated by OpenAI for UI responses
+                  uiSummaryMessageRef.current = data.content;
+                  setUiSummaryMessage(data.content);
+                  // Keep in thinking state, don't show preview yet
+                  setThinkingMessage('Generating UI...');
+                } else if (data.type === 'ui_chunk') {
+                  // UI chunk from C1 - save full content but DON'T show in response bar
+                  responseType = 'ui';
+                  setCurrentResponseType('ui');
+                  // Stay in thinking state while streaming UI
+                  setThinkingMessage('Generating UI...');
+                  streamedResponse += data.content;
+                  setStreamedAiResponse(streamedResponse);
+                  
+                  // Auto-scroll in full mode
+                  if (aiBarState === 'full' && scrollContainerRef.current) {
+                    scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
+                  }
+                } else if (data.type === 'text') {
+                  // Text response (no UI) - show in preview as it streams
+                  responseType = 'text';
                   if (previousState !== 'full' && aiBarState !== 'preview') {
                     setAiBarState('preview');
                   }
-                  streamedResponse += data.content;
-                  setCurrentAiResponse(streamedResponse);
+                  streamedResponse = data.content;
+                  setStreamedAiResponse(streamedResponse);
                   
                   // Auto-scroll in full mode
                   if (aiBarState === 'full' && scrollContainerRef.current) {
                     scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
                   }
                 } else if (data.type === 'done') {
-                  const newMessage: ChatMessage = {
-                    id: userMessageId,
-                    userMessage: userMessage,
-                    aiResponse: streamedResponse,
-                    timestamp: new Date(),
-                  };
-                  setChatHistory(prev => [...prev, newMessage]);
+                  setIsStreaming(false);
+                  // Save text responses in chat history (only if we have userMessageId)
+                  if (responseType === 'text' && userMessageId) {
+                    const newMessage: ChatMessage = {
+                      id: userMessageId,
+                      userMessage: userMessage,
+                      aiResponse: streamedResponse,
+                      responseType: responseType,
+                      timestamp: new Date(),
+                    };
+                    setChatHistory(prev => [...prev, newMessage]);
+                  } else if (responseType === 'ui' && userMessageId) {
+                    // For UI responses, save the summary message
+                    const summaryText = uiSummaryMessageRef.current || 'UI generated! Check the workspace.';
+                    const newMessage: ChatMessage = {
+                      id: userMessageId,
+                      userMessage: userMessage,
+                      aiResponse: summaryText,
+                      responseType: 'text', // Save as text in history
+                      timestamp: new Date(),
+                    };
+                    setChatHistory(prev => [...prev, newMessage]);
+                    // Set the current response for preview
+                    setCurrentAiResponse(summaryText);
+                  }
+                  
+                  // If we don't have userMessageId yet, log warning
+                  if (!userMessageId) {
+                    console.warn('[done] userMessageId is missing, message not saved to history');
+                  }
                   // Se eravamo in full mode, rimaniamo in full
                   if (previousState === 'full') {
                     setAiBarState('full');
@@ -285,15 +370,17 @@ function ChatPageContent() {
       setIsProcessing(false);
       abortControllerRef.current = null;
     }
-  };
+  }, [isProcessing, params.id, aiBarState, router]);
 
   const handleStopProcessing = () => {
     // Save user message to history before stopping
+    setIsStreaming(false);
     if (currentUserMessage) {
       const newMessage: ChatMessage = {
         id: `temp-${Date.now()}`,
         userMessage: currentUserMessage,
         aiResponse: "[Request cancelled]",
+        responseType: 'text',
         timestamp: new Date(),
       };
       setChatHistory(prev => [...prev, newMessage]);
@@ -313,6 +400,31 @@ function ChatPageContent() {
   const handleCopyMessage = (text: string) => {
     navigator.clipboard.writeText(text);
   };
+
+  // Wrapper for handleSendMessage that uses inputValue state
+  const handleSendMessage = async () => {
+    const message = inputValue.trim();
+    if (!message) return;
+    
+    setInputValue(''); // Clear input
+    await sendMessageWithText(message);
+  };
+
+  // Send initial message from query string (when coming from home)
+  useEffect(() => {
+    if (typeof window !== 'undefined' && !initialMessageSentRef.current) {
+      const searchParams = new URLSearchParams(window.location.search);
+      const message = searchParams.get('message');
+      
+      if (message && message.trim()) {
+        initialMessageSentRef.current = true;
+        // Trigger send after component is mounted WITHOUT setting inputValue
+        setTimeout(() => {
+          sendMessageWithText(message.trim());
+        }, 100);
+      }
+    }
+  }, [params.id, sendMessageWithText]);
 
   const startEditingMessage = (messageId: string, currentText: string) => {
     setEditingMessageId(messageId);
@@ -558,9 +670,18 @@ function ChatPageContent() {
         onClick={(aiBarState === "expanded" || aiBarState === "full") ? handleOverlayClick : undefined}
       >
         {/* Generative UI Area - occupies entire workspace */}
-        <div className="absolute inset-0 overflow-auto">
-          {/* Qui verrà generata la UI dinamica */}
-          
+        <div className="absolute inset-0 overflow-auto p-8">
+          {streamedAiResponse ? (
+            <C1Renderer 
+              content={streamedAiResponse} 
+              type={currentResponseType}
+              streaming={isStreaming}
+            />
+          ) : (
+            <div className="flex items-center justify-center h-full text-neutral-400">
+              <p>Start a conversation to see data visualizations</p>
+            </div>
+          )}
         </div>
 
         {/* AI Response Bar - Unified Panel */}
@@ -573,10 +694,12 @@ function ChatPageContent() {
                 : "left-1/2 -translate-x-1/2 w-full max-w-[calc(48rem+1rem)] px-8 " + (aiBarState === "expanded" ? "bottom-6" : "bottom-26")
           }`}>
             <div 
-              onClick={(e) => {
-                e.stopPropagation();
-                if (aiBarState === "preview" || aiBarState === "button") handleBarClick();
-              }}
+              {...((aiBarState === "preview" || aiBarState === "button") && {
+                onClick: (e: React.MouseEvent) => {
+                  e.stopPropagation();
+                  handleBarClick();
+                }
+              })}
               onMouseEnter={handleBarMouseEnter}
               onMouseLeave={handleBarMouseLeave}
               className={`bg-white shadow-md border-2 border-neutral-100 backdrop-blur-sm transition-all duration-300 relative ${
@@ -643,10 +766,9 @@ function ChatPageContent() {
                 ) : null}
                 {(aiBarState === "expanded" || aiBarState === "full") ? (
                   // Expanded/Full: Show full chat history
-                  <>
-                  {chatHistory.map((message, index) => (
+                  <>{chatHistory.map((message, index) => (
                     <div 
-                      key={message.id} 
+                      key={`msg-${message.id}`} 
                       className="space-y-3"
                     >
                       {/* User message */}
@@ -758,10 +880,10 @@ function ChatPageContent() {
                     <span className="text-sm text-neutral-500 ml-2">{thinkingMessage}</span>
                   </div>
                 ) : aiBarState === "preview" ? (
-                  // Preview state
+                  // Preview state - show last message from history if available
                   <div className="relative max-h-[72px] overflow-hidden">
                     <p className="text-sm text-neutral-800 leading-relaxed line-clamp-3">
-                      {currentAiResponse}
+                      {chatHistory.length > 0 ? chatHistory[chatHistory.length - 1].aiResponse : currentAiResponse}
                     </p>
                   </div>
                 ) : null}

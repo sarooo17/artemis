@@ -60,8 +60,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
       }
     } catch (error) {
-      console.error('Auth check failed:', error);
-      setUser(null);
+      // Silently fail if server is not available
+      if (error instanceof Error && error.message.includes('Network error')) {
+        // Network error - server probably not running
+        setUser(null);
+      } else {
+        console.error('Auth check failed:', error);
+        setUser(null);
+      }
     } finally {
       setIsLoading(false);
     }
@@ -118,6 +124,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       return true;
     } catch (error) {
+      // Silently fail if server is not available (don't spam console)
+      if (error instanceof Error && error.message.includes('Network error')) {
+        // Network error - server probably not running
+        return false;
+      }
       console.error('Token refresh failed:', error);
       return false;
     }
