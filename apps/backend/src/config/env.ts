@@ -15,6 +15,9 @@ const envSchema = z.object({
   COOKIE_DOMAIN: z.string().default('localhost'),
   COOKIE_SECURE: z.string().transform((val) => val === 'true').default('false'),
   
+  // Redis
+  REDIS_URL: z.string().default('redis://localhost:6379'),
+  
   // Email configuration
   SMTP_HOST: z.string().default('smtp.gmail.com'),
   SMTP_PORT: z.string().default('587'),

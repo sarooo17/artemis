@@ -1,9 +1,10 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { prisma } from '../config/database';
-import { requireAuth, AuthRequest, optionalAuth } from '../middleware/auth.middleware';
+import { requireAuth, optionalAuth } from '../middleware/auth.middleware';
 import { validateBody } from '../middleware/validation.middleware';
 import { OpenAIService } from '../services/openai.service';
+import { sendMessageSchema, forkChatSchema, updateSessionSchema } from '../validators/common.validators';
 
 const router = Router();
 
@@ -86,7 +87,7 @@ router.get('/sessions/:id', requireAuth as any, async (req: Request, res: Respon
  * POST /api/chat/sessions
  * Create new chat session
  */
-router.post('/sessions', requireAuth as any, validateBody(createSessionSchema), async (req: AuthRequest, res: Response): Promise<void> => {
+router.post('/sessions', requireAuth as any, validateBody(createSessionSchema), async (req: Request, res: Response): Promise<void> => {
   try {
     const { title, tempSessionId } = req.body;
 
@@ -109,7 +110,7 @@ router.post('/sessions', requireAuth as any, validateBody(createSessionSchema), 
  * POST /api/chat/send/stream
  * Send message and get AI response with streaming (creates session if needed)
  */
-router.post('/send/stream', requireAuth as any, async (req: Request, res: Response) => {
+router.post('/send/stream', requireAuth as any, validateBody(sendMessageSchema), async (req: Request, res: Response) => {
   try {
     const userId = (req as any).user?.id;
     const { message, sessionId } = req.body;
@@ -648,7 +649,7 @@ router.delete('/sessions/:id', requireAuth as any, async (req: Request, res: Res
  * POST /api/chat/claim-sessions
  * Claim anonymous sessions after login
  */
-router.post('/claim-sessions', requireAuth as any, async (req: AuthRequest, res: Response): Promise<void> => {
+router.post('/claim-sessions', requireAuth as any, async (req: Request, res: Response): Promise<void> => {
   try {
     const { tempSessionId } = req.body;
 
@@ -682,7 +683,7 @@ router.post('/claim-sessions', requireAuth as any, async (req: AuthRequest, res:
  * GET /api/chat/search
  * Search chat sessions by title
  */
-router.get('/search', requireAuth as any, async (req: AuthRequest, res: Response): Promise<void> => {
+router.get('/search', requireAuth as any, async (req: Request, res: Response): Promise<void> => {
   try {
     const query = req.query.q as string;
     

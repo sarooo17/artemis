@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import Navbar from "@/components/Navbar";
+import { api } from '@/lib/api';
 import DashboardTabs from "@/components/dashboard/DashboardTabs";
 import WidgetCard from "@/components/dashboard/WidgetCard";
 import CreateCategoryModal from "@/components/dashboard/CreateCategoryModal";
@@ -57,12 +58,7 @@ function DashboardPage() {
 
   const loadCategories = async () => {
     try {
-      const token = localStorage.getItem('accessToken');
-      const response = await fetch('http://localhost:3001/api/dashboard/categories', {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-      });
+      const response = await api.get('/dashboard/categories');
 
       if (response.ok) {
         const data = await response.json();
@@ -81,15 +77,7 @@ function DashboardPage() {
 
   const handleCreateCategory = async (name: string, icon: string) => {
     try {
-      const token = localStorage.getItem('accessToken');
-      const response = await fetch('http://localhost:3001/api/dashboard/categories', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ name, icon }),
-      });
+      const response = await api.post('/dashboard/categories', { name, icon });
 
       if (response.ok) {
         await loadCategories();
@@ -101,8 +89,6 @@ function DashboardPage() {
 
   const loadOverviewData = async () => {
     try {
-      const token = localStorage.getItem('accessToken');
-      
       // TODO: Load ERP data here (orders, customers, products, revenue)
       // For now showing placeholder data
       
@@ -152,13 +138,7 @@ function DashboardPage() {
     if (!confirm('Are you sure you want to delete this widget?')) return;
 
     try {
-      const token = localStorage.getItem('accessToken');
-      const response = await fetch(`http://localhost:3001/api/dashboard/widgets/${widgetId}`, {
-        method: 'DELETE',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-      });
+      const response = await api.delete(`/dashboard/widgets/${widgetId}`);
 
       if (response.ok) {
         await loadCategories();
@@ -172,13 +152,7 @@ function DashboardPage() {
     if (!confirm('Are you sure you want to delete this category?')) return;
 
     try {
-      const token = localStorage.getItem('accessToken');
-      const response = await fetch(`http://localhost:3001/api/dashboard/categories/${categoryId}`, {
-        method: 'DELETE',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-      });
+      const response = await api.delete(`/dashboard/categories/${categoryId}`);
 
       if (response.ok) {
         await loadCategories();

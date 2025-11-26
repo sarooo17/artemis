@@ -1,6 +1,7 @@
 import jwt from 'jsonwebtoken';
 import { env } from '../config/env';
 import { prisma } from '../config/database';
+import { SessionService } from './session.service';
 
 export interface AccessTokenPayload {
   userId: string;
@@ -10,6 +11,7 @@ export interface AccessTokenPayload {
 export interface RefreshTokenPayload {
   userId: string;
   tokenId: string;
+  jti?: string; // JWT ID for session tracking
 }
 
 export class TokenService {
@@ -25,12 +27,17 @@ export class TokenService {
   /**
    * Generate refresh token (long-lived) and store in DB
    */
-  static async generateRefreshToken(userId: string): Promise<string> {
+  static async generateRefreshToken(
+    userId: string,
+    metadata?: { ip?: string; userAgent?: string }
+  ): Promise<string> {
     const tokenId = crypto.randomUUID();
+    const jti = crypto.randomUUID(); // Unique JWT ID for session tracking
     
     const payload: RefreshTokenPayload = {
       userId,
       tokenId,
+      jti,
     };
 
     const token = jwt.sign(payload, env.JWT_REFRESH_SECRET, {
@@ -51,6 +58,13 @@ export class TokenService {
       },
     });
 
+    // Track session in Redis
+    await SessionService.createSession(userId, jti, {
+      ip: metadata?.ip,
+      userAgent: metadata?.userAgent,
+      createdAt: new Date(),
+    });
+
     return token;
   }
 
@@ -67,7 +81,7 @@ export class TokenService {
   }
 
   /**
-   * Verify refresh token and check if it exists in DB
+   * Verify refresh token and check if it exists in DB and Redis
    */
   static async verifyRefreshToken(token: string): Promise<RefreshTokenPayload | null> {
     try {
@@ -82,6 +96,15 @@ export class TokenService {
         return null;
       }
 
+      // Check if session is still valid in Redis (for immediate revocation)
+      if (payload.jti) {
+        const isValid = await SessionService.isSessionValid(payload.jti);
+        if (!isValid) {
+          console.log(`⚠️  Session ${payload.jti} revoked in Redis`);
+          return null;
+        }
+      }
+
       return payload;
     } catch (error) {
       return null;
@@ -91,12 +114,17 @@ export class TokenService {
   /**
    * Revoke refresh token (logout)
    */
-  static async revokeRefreshToken(tokenId: string): Promise<void> {
+  static async revokeRefreshToken(tokenId: string, jti?: string): Promise<void> {
     await prisma.refreshToken.delete({
       where: { id: tokenId },
     }).catch(() => {
       // Token might not exist, ignore error
     });
+
+    // Revoke session in Redis
+    if (jti) {
+      await SessionService.revokeSession(jti);
+    }
   }
 
   /**
@@ -106,6 +134,9 @@ export class TokenService {
     await prisma.refreshToken.deleteMany({
       where: { userId },
     });
+
+    // Revoke all sessions in Redis
+    await SessionService.revokeAllUserSessions(userId);
   }
 
   /**

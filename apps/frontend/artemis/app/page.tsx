@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import ProtectedRoute from "@/components/ProtectedRoute";
+import { api } from '@/lib/api';
 import Navbar from "@/components/Navbar";
 
 function HomePage() {
@@ -17,8 +18,6 @@ function HomePage() {
     setSending(true);
     
     try {
-      const token = localStorage.getItem('accessToken');
-      
       // Create a temporary session ID for immediate redirect
       const tempId = `temp-${Date.now()}`;
       
@@ -26,14 +25,7 @@ function HomePage() {
       router.push(`/chat/${tempId}`);
       
       // Send the message in the background
-      const response = await fetch('http://localhost:3001/api/chat/send', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ message }),
-      });
+      const response = await api.post('/chat/send', { message });
 
       if (response.ok) {
         const data = await response.json();

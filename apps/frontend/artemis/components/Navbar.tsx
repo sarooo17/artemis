@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/contexts/AuthContext";
+import { api } from '@/lib/api';
 import GeneralSettings from "./settings/GeneralSettings";
 import AccountSettings from "./settings/AccountSettings";
 import PersonalizationSettings from "./settings/PersonalizationSettings";
@@ -68,33 +69,26 @@ export default function Navbar() {
       }
 
       // Fetch fresh data from API but don't override user's saved preference
-      const token = localStorage.getItem('accessToken');
-      if (token) {
-        const response = await fetch('http://localhost:3001/api/user/available-contexts', {
-          headers: {
-            'Authorization': `Bearer ${token}`,
-          },
-        });
+      const response = await api.get('/user/available-contexts');
 
-        if (response.ok) {
-          const data = await response.json();
+      if (response.ok) {
+        const data = await response.json();
           
-          // Only update if no saved context exists
-          if (!savedContext) {
-            const companyName = data.currentContext.companyName || 'Company';
-            const departmentName = data.currentContext.departmentName || 'All departments';
-            
-            setCompanyName(companyName);
-            setDepartmentName(departmentName);
-            
-            // Save to localStorage
-            localStorage.setItem('userContext', JSON.stringify({
-              companyName,
-              departmentName,
-              companyId: data.currentContext.companyId,
-              departmentId: data.currentContext.departmentId,
-            }));
-          }
+        // Only update if no saved context exists
+        if (!savedContext) {
+          const companyName = data.currentContext.companyName || 'Company';
+          const departmentName = data.currentContext.departmentName || 'All departments';
+          
+          setCompanyName(companyName);
+          setDepartmentName(departmentName);
+          
+          // Save to localStorage
+          localStorage.setItem('userContext', JSON.stringify({
+            companyName,
+            departmentName,
+            companyId: data.currentContext.companyId,
+            departmentId: data.currentContext.departmentId,
+          }));
         }
       }
     } catch (error) {
@@ -130,16 +124,8 @@ export default function Navbar() {
   }, []);
 
   const loadWorkspaces = async () => {
-    const token = localStorage.getItem('accessToken');
-    if (!token) return;
-
     try {
-      const response = await fetch('http://localhost:3001/api/chat/sessions', {
-        credentials: 'include',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-      });
+      const response = await api.get('/chat/sessions');
       if (response.ok) {
         const data = await response.json();
         setWorkspaces(data.sessions);
@@ -156,12 +142,7 @@ export default function Navbar() {
   const handleOpenSearch = async () => {
     setIsSearchOpen(true);
     try {
-      const response = await fetch('http://localhost:3001/api/chat/sessions', {
-        credentials: 'include',
-        headers: {
-          'Authorization': `Bearer ${localStorage.getItem('accessToken')}`,
-        },
-      });
+      const response = await api.get('/chat/sessions');
       if (response.ok) {
         const data = await response.json();
         setRecentChats(data.sessions.slice(0, 5));
@@ -206,12 +187,7 @@ export default function Navbar() {
   const handleContextSwitch = async () => {
     // Reload user data and update UI
     try {
-      const token = localStorage.getItem('accessToken');
-      const response = await fetch('http://localhost:3001/api/user/available-contexts', {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-      });
+      const response = await api.get('/user/available-contexts');
 
       if (response.ok) {
         const data = await response.json();
@@ -235,15 +211,7 @@ export default function Navbar() {
   };
 
   const handleSaveSettings = async (settings: any) => {
-    const token = localStorage.getItem('accessToken');
-    const response = await fetch('http://localhost:3001/api/settings/user', {
-      method: 'PUT',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(settings),
-    });
+    const response = await api.put('/settings/user', settings);
 
     if (!response.ok) {
       throw new Error('Failed to save settings');
@@ -253,15 +221,7 @@ export default function Navbar() {
   };
 
   const handleSaveAccount = async (accountData: any) => {
-    const token = localStorage.getItem('accessToken');
-    const response = await fetch('http://localhost:3001/api/settings/account', {
-      method: 'PUT',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(accountData),
-    });
+    const response = await api.put('/settings/account', accountData);
 
     if (!response.ok) {
       throw new Error('Failed to save account');
@@ -271,15 +231,7 @@ export default function Navbar() {
   };
 
   const handleSaveCompany = async (companyData: any) => {
-    const token = localStorage.getItem('accessToken');
-    const response = await fetch('http://localhost:3001/api/settings/company', {
-      method: 'PUT',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(companyData),
-    });
+    const response = await api.put('/settings/company', companyData);
 
     if (!response.ok) {
       throw new Error('Failed to save company settings');
@@ -317,15 +269,7 @@ export default function Navbar() {
     }
 
     try {
-      const token = localStorage.getItem('accessToken');
-      const response = await fetch(`http://localhost:3001/api/chat/sessions/${chatId}/rename`, {
-        method: 'PUT',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ title: renameValue.trim() }),
-      });
+      const response = await api.put(`/chat/sessions/${chatId}/rename`, { title: renameValue.trim() });
 
       if (response.ok) {
         loadWorkspaces();
@@ -354,13 +298,7 @@ export default function Navbar() {
     if (!chatToArchive) return;
 
     try {
-      const token = localStorage.getItem('accessToken');
-      const response = await fetch(`http://localhost:3001/api/chat/sessions/${chatToArchive}/archive`, {
-        method: 'PUT',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-      });
+      const response = await api.put(`/chat/sessions/${chatToArchive}/archive`, {});
 
       if (response.ok) {
         loadWorkspaces();
@@ -393,13 +331,7 @@ export default function Navbar() {
     if (!chatToDelete) return;
 
     try {
-      const token = localStorage.getItem('accessToken');
-      const response = await fetch(`http://localhost:3001/api/chat/sessions/${chatToDelete}`, {
-        method: 'DELETE',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-      });
+      const response = await api.delete(`/chat/sessions/${chatToDelete}`);
 
       if (response.ok) {
         loadWorkspaces();
@@ -426,12 +358,7 @@ export default function Navbar() {
 
     setIsSearching(true);
     try {
-      const response = await fetch(`http://localhost:3001/api/search?q=${encodeURIComponent(query)}`, {
-        credentials: 'include',
-        headers: {
-          'Authorization': `Bearer ${localStorage.getItem('accessToken')}`,
-        },
-      });
+      const response = await api.get(`/search?q=${encodeURIComponent(query)}`);
       
       if (response.ok) {
         const data = await response.json();

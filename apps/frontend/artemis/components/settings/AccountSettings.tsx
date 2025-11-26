@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { api } from '@/lib/api';
 
 interface AccountSettingsProps {
   user: any;
@@ -31,12 +32,7 @@ export default function AccountSettings({ user, onSave }: AccountSettingsProps) 
 
   const loadAccountData = async () => {
     try {
-      const token = localStorage.getItem('accessToken');
-      const response = await fetch('http://localhost:3001/api/settings/account', {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-      });
+      const response = await api.get('/settings/account');
       if (response.ok) {
         const data = await response.json();
         setAccountData({
@@ -81,17 +77,9 @@ export default function AccountSettings({ user, onSave }: AccountSettingsProps) 
 
     setLoading(true);
     try {
-      const token = localStorage.getItem('accessToken');
-      const response = await fetch('http://localhost:3001/api/settings/account/change-password', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          currentPassword: passwordData.currentPassword,
-          newPassword: passwordData.newPassword,
-        }),
+      const response = await api.post('/settings/account/change-password', {
+        currentPassword: passwordData.currentPassword,
+        newPassword: passwordData.newPassword,
       });
 
       if (response.ok) {

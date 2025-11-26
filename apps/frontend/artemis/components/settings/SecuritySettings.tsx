@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { api } from '@/lib/api';
 
 interface SecuritySettingsProps {
   user: any;
@@ -18,25 +19,15 @@ export default function SecuritySettings({ user }: SecuritySettingsProps) {
 
   const loadSecurityData = async () => {
     try {
-      const token = localStorage.getItem('accessToken');
-      
       // Load sessions
-      const sessionsResponse = await fetch('http://localhost:3001/api/settings/security/sessions', {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-      });
+      const sessionsResponse = await api.get('/settings/security/sessions');
       if (sessionsResponse.ok) {
         const sessionsData = await sessionsResponse.json();
         setSessions(sessionsData);
       }
 
       // Load audit logs
-      const logsResponse = await fetch('http://localhost:3001/api/settings/security/audit-logs?limit=20', {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-      });
+      const logsResponse = await api.get('/settings/security/audit-logs?limit=20');
       if (logsResponse.ok) {
         const logsData = await logsResponse.json();
         setAuditLogs(logsData);
@@ -49,19 +40,25 @@ export default function SecuritySettings({ user }: SecuritySettingsProps) {
   };
 
   const handleRevokeSession = async (sessionId: string) => {
-    if (!confirm('Are you sure you want to revoke this session?')) return;
+    const isLastSession = sessions.length === 1;
+    const confirmMessage = isLastSession
+      ? 'This is your current session. You will be logged out. Continue?'
+      : 'Are you sure you want to revoke this session?';
+    
+    if (!confirm(confirmMessage)) return;
 
     try {
-      const token = localStorage.getItem('accessToken');
-      const response = await fetch(`http://localhost:3001/api/settings/security/sessions/${sessionId}`, {
-        method: 'DELETE',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-      });
+      const response = await api.delete(`/settings/security/sessions/${sessionId}`);
 
       if (response.ok) {
-        setSessions(sessions.filter(s => s.id !== sessionId));
+        // If it was the last/only session, logout
+        if (isLastSession) {
+          // Logout will handle redirect
+          await api.post('/auth/logout');
+          window.location.href = '/login';
+        } else {
+          setSessions(sessions.filter(s => s.id !== sessionId));
+        }
       }
     } catch (error) {
       console.error('Failed to revoke session:', error);

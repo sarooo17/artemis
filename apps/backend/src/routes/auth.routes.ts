@@ -4,7 +4,8 @@ import { prisma } from '../config/database';
 import { PasswordService } from '../services/password.service';
 import { TokenService } from '../services/token.service';
 import { validateBody } from '../middleware/validation.middleware';
-import { requireAuth, AuthRequest } from '../middleware/auth.middleware';
+import { requireAuth } from '../middleware/auth.middleware';
+import { setCsrfToken, verifyCsrfToken, clearCsrfToken } from '../middleware/csrf.middleware';
 import { env } from '../config/env';
 
 const router = Router();
@@ -23,7 +24,7 @@ const refreshSchema = z.object({
  * POST /api/auth/login
  * Authenticate user and return tokens
  */
-router.post('/login', validateBody(loginSchema), async (req: Request, res: Response): Promise<void> => {
+router.post('/login', validateBody(loginSchema), setCsrfToken, async (req: Request, res: Response): Promise<void> => {
   try {
     const { email, password } = req.body;
 
@@ -45,13 +46,16 @@ router.post('/login', validateBody(loginSchema), async (req: Request, res: Respo
       return;
     }
 
-    // Generate tokens
+    // Generate tokens with session metadata
     const accessToken = TokenService.generateAccessToken({
       userId: user.id,
       email: user.email,
     });
 
-    const refreshToken = await TokenService.generateRefreshToken(user.id);
+    const refreshToken = await TokenService.generateRefreshToken(user.id, {
+      ip: req.ip || req.socket.remoteAddress,
+      userAgent: req.headers['user-agent'],
+    });
 
     // Set refresh token in HttpOnly cookie
     res.cookie('refreshToken', refreshToken, {
@@ -62,7 +66,16 @@ router.post('/login', validateBody(loginSchema), async (req: Request, res: Respo
       domain: env.COOKIE_DOMAIN,
     });
 
-    // Return user data and access token
+    // Set access token in HttpOnly cookie
+    res.cookie('accessToken', accessToken, {
+      httpOnly: true,
+      secure: env.COOKIE_SECURE,
+      sameSite: 'strict',
+      maxAge: 15 * 60 * 1000, // 15 minutes
+      domain: env.COOKIE_DOMAIN,
+    });
+
+    // Return user data only (no tokens in body)
     res.json({
       user: {
         id: user.id,
@@ -73,7 +86,6 @@ router.post('/login', validateBody(loginSchema), async (req: Request, res: Respo
         companyId: user.companyId,
         createdAt: user.createdAt,
       },
-      accessToken,
     });
   } catch (error) {
     console.error('Login error:', error);
@@ -85,7 +97,7 @@ router.post('/login', validateBody(loginSchema), async (req: Request, res: Respo
  * GET /api/auth/me
  * Get current authenticated user
  */
-router.get('/me', requireAuth as any, async (req: AuthRequest, res: Response): Promise<void> => {
+router.get('/me', requireAuth as any, async (req: Request, res: Response): Promise<void> => {
   try {
     const user = await prisma.user.findUnique({
       where: { id: req.user!.id },
@@ -161,9 +173,12 @@ router.post('/refresh', async (req: Request, res: Response): Promise<void> => {
       email: user.email,
     });
 
-    // Optionally rotate refresh token (recommended for security)
-    await TokenService.revokeRefreshToken(payload.tokenId);
-    const newRefreshToken = await TokenService.generateRefreshToken(user.id);
+    // Rotate refresh token (recommended for security)
+    await TokenService.revokeRefreshToken(payload.tokenId, payload.jti);
+    const newRefreshToken = await TokenService.generateRefreshToken(user.id, {
+      ip: req.ip || req.socket.remoteAddress,
+      userAgent: req.headers['user-agent'],
+    });
 
     // Update cookie with new refresh token
     res.cookie('refreshToken', newRefreshToken, {
@@ -174,7 +189,16 @@ router.post('/refresh', async (req: Request, res: Response): Promise<void> => {
       domain: env.COOKIE_DOMAIN,
     });
 
-    res.json({ accessToken });
+    // Set new access token in HttpOnly cookie
+    res.cookie('accessToken', accessToken, {
+      httpOnly: true,
+      secure: env.COOKIE_SECURE,
+      sameSite: 'strict',
+      maxAge: 15 * 60 * 1000, // 15 minutes
+      domain: env.COOKIE_DOMAIN,
+    });
+
+    res.json({ success: true });
   } catch (error) {
     console.error('Refresh token error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -185,7 +209,7 @@ router.post('/refresh', async (req: Request, res: Response): Promise<void> => {
  * POST /api/auth/logout
  * Logout user and invalidate refresh token
  */
-router.post('/logout', async (req: Request, res: Response): Promise<void> => {
+router.post('/logout', verifyCsrfToken, clearCsrfToken, async (req: Request, res: Response): Promise<void> => {
   try {
     const refreshToken = req.cookies.refreshToken;
 
@@ -194,13 +218,20 @@ router.post('/logout', async (req: Request, res: Response): Promise<void> => {
       const payload = await TokenService.verifyRefreshToken(refreshToken);
       
       if (payload) {
-        // Revoke token
-        await TokenService.revokeRefreshToken(payload.tokenId);
+        // Revoke token and Redis session
+        await TokenService.revokeRefreshToken(payload.tokenId, payload.jti);
       }
     }
 
-    // Clear cookie
+    // Clear both cookies
     res.clearCookie('refreshToken', {
+      httpOnly: true,
+      secure: env.COOKIE_SECURE,
+      sameSite: 'strict',
+      domain: env.COOKIE_DOMAIN,
+    });
+    
+    res.clearCookie('accessToken', {
       httpOnly: true,
       secure: env.COOKIE_SECURE,
       sameSite: 'strict',

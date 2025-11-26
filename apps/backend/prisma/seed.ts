@@ -16,12 +16,12 @@ async function seedDatabase() {
         priceYearly: 0,
         maxUsers: 3,
         maxChatSessions: 50,
-        features: JSON.stringify([
+        features: [
           'Up to 3 users',
           '50 chat sessions',
           'Basic AI assistant',
           'Email support'
-        ]),
+        ],
       },
     });
 
@@ -33,14 +33,14 @@ async function seedDatabase() {
         priceYearly: 290,
         maxUsers: 10,
         maxChatSessions: 500,
-        features: JSON.stringify([
+        features: [
           'Up to 10 users',
           '500 chat sessions',
           'Advanced AI models',
           'Fluentis integration',
           'Priority support',
           'Custom workflows'
-        ]),
+        ],
       },
     });
 
@@ -52,7 +52,7 @@ async function seedDatabase() {
         priceYearly: 990,
         maxUsers: -1,
         maxChatSessions: -1,
-        features: JSON.stringify([
+        features: [
           'Unlimited users',
           'Unlimited chat sessions',
           'Premium AI models',
@@ -61,7 +61,7 @@ async function seedDatabase() {
           'Custom integrations',
           'Advanced security',
           'SSO & SAML'
-        ]),
+        ],
       },
     });
 
@@ -385,43 +385,43 @@ async function seedDatabase() {
             type: 'metric',
             title: 'Total Revenue',
             description: 'Monthly revenue',
-            config: JSON.stringify({ currency: 'EUR' }),
-            data: JSON.stringify({ value: '€124,500', change: 12.5 }),
-            position: JSON.stringify({ x: 0, y: 0, w: 1, h: 1 }),
+            config: { currency: 'EUR' },
+            data: { value: '€124,500', change: 12.5 },
+            position: { x: 0, y: 0, w: 1, h: 1 },
           },
           {
             dashboardId: overviewDashboard.id,
             type: 'metric',
             title: 'Active Users',
             description: 'Current active users',
-            config: JSON.stringify({}),
-            data: JSON.stringify({ value: '1,234', change: 8.3 }),
-            position: JSON.stringify({ x: 1, y: 0, w: 1, h: 1 }),
+            config: {},
+            data: { value: '1,234', change: 8.3 },
+            position: { x: 1, y: 0, w: 1, h: 1 },
           },
           {
             dashboardId: overviewDashboard.id,
             type: 'metric',
             title: 'Conversion Rate',
             description: 'This month',
-            config: JSON.stringify({}),
-            data: JSON.stringify({ value: '3.24%', change: -2.1 }),
-            position: JSON.stringify({ x: 2, y: 0, w: 1, h: 1 }),
+            config: {},
+            data: { value: '3.24%', change: -2.1 },
+            position: { x: 2, y: 0, w: 1, h: 1 },
           },
           {
             dashboardId: overviewDashboard.id,
             type: 'list',
             title: 'Recent Activities',
             description: 'Latest team updates',
-            config: JSON.stringify({}),
-            data: JSON.stringify({
+            config: {},
+            data: {
               items: [
                 { title: 'New order received', subtitle: '2 hours ago' },
                 { title: 'Invoice sent to client', subtitle: '4 hours ago' },
                 { title: 'Meeting scheduled', subtitle: 'Yesterday' },
                 { title: 'Report generated', subtitle: '2 days ago' },
               ],
-            }),
-            position: JSON.stringify({ x: 0, y: 1, w: 2, h: 2 }),
+            },
+            position: { x: 0, y: 1, w: 2, h: 2 },
           },
         ],
       });
@@ -443,12 +443,12 @@ async function seedDatabase() {
           type: 'chart',
           title: 'Monthly Performance',
           description: 'Revenue trends over time',
-          config: JSON.stringify({ chartType: 'line', colors: ['#3B82F6'] }),
-          data: JSON.stringify({
+          config: { chartType: 'line', colors: ['#3B82F6'] },
+          data: {
             labels: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun'],
             datasets: [{ label: 'Revenue', data: [12000, 15000, 13000, 18000, 20000, 22000] }],
-          }),
-          position: JSON.stringify({ x: 0, y: 0, w: 3, h: 2 }),
+          },
+          position: { x: 0, y: 0, w: 3, h: 2 },
         },
       });
 
@@ -470,25 +470,25 @@ async function seedDatabase() {
             type: 'metric',
             title: 'Monthly Sales',
             description: 'Current month',
-            config: JSON.stringify({ currency: 'EUR' }),
-            data: JSON.stringify({ value: '€45,200', change: 15.8 }),
-            position: JSON.stringify({ x: 0, y: 0, w: 1, h: 1 }),
+            config: { currency: 'EUR' },
+            data: { value: '€45,200', change: 15.8 },
+            position: { x: 0, y: 0, w: 1, h: 1 },
           },
           {
             dashboardId: salesDashboard.id,
             type: 'table',
             title: 'Top Products',
             description: 'Best performing products',
-            config: JSON.stringify({}),
-            data: JSON.stringify({
+            config: {},
+            data: {
               columns: ['Product', 'Sales', 'Growth'],
               rows: [
                 ['Product A', '€12,500', '+12%'],
                 ['Product B', '€9,800', '+8%'],
                 ['Product C', '€7,200', '+5%'],
               ],
-            }),
-            position: JSON.stringify({ x: 0, y: 1, w: 2, h: 2 }),
+            },
+            position: { x: 0, y: 1, w: 2, h: 2 },
           },
         ],
       });

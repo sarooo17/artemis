@@ -1,9 +1,8 @@
 import { Router, Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
 import { requireAuth } from '../middleware/auth.middleware';
+import { prisma } from '../config/database';
 
 const router = Router();
-const prisma = new PrismaClient();
 
 // Global search endpoint
 router.get('/', requireAuth as any, async (req: Request, res: Response) => {

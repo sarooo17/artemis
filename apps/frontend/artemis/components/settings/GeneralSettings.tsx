@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { api } from '@/lib/api';
 
 interface GeneralSettingsProps {
   onSave: (settings: any) => Promise<void>;
@@ -22,12 +23,7 @@ export default function GeneralSettings({ onSave }: GeneralSettingsProps) {
 
   const loadSettings = async () => {
     try {
-      const token = localStorage.getItem('accessToken');
-      const response = await fetch('http://localhost:3001/api/settings/user', {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-      });
+      const response = await api.get('/settings/user');
       if (response.ok) {
         const data = await response.json();
         setSettings({

@@ -1,8 +1,9 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useRouter, useParams } from "next/navigation";
 import ProtectedRoute from "@/components/ProtectedRoute";
+import { api } from '@/lib/api';
 import Navbar from "@/components/Navbar";
 import { useAuth } from "@/contexts/AuthContext";
 
@@ -118,12 +119,7 @@ function ChatPageContent() {
 
   const loadChatSession = async () => {
     try {
-      const token = localStorage.getItem('accessToken');
-      const response = await fetch(`http://localhost:3001/api/chat/sessions/${params.id}`, {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-      });
+      const response = await api.get(`/chat/sessions/${params.id}`);
 
       if (response.ok) {
         const data = await response.json();
@@ -178,17 +174,10 @@ function ChatPageContent() {
     abortControllerRef.current = new AbortController();
     
     try {
-      const token = localStorage.getItem('accessToken');
-      const response = await fetch('http://localhost:3001/api/chat/send/stream', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          sessionId: params.id,
-          message: userMessage,
-        }),
+      const response = await api.post('/chat/send/stream', {
+        sessionId: params.id,
+        message: userMessage,
+      }, {
         signal: abortControllerRef.current.signal,
       });
 
@@ -358,19 +347,11 @@ function ChatPageContent() {
     }, 2000);
 
     try {
-      const token = localStorage.getItem('accessToken');
       const sessionId = Array.isArray(params.id) ? params.id[0] : params.id;
       
-      const response = await fetch(`http://localhost:3001/api/chat/sessions/${sessionId}/fork`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          messageId: messageId,
-          newMessage: newMessage,
-        }),
+      const response = await api.post(`/chat/sessions/${sessionId}/fork`, {
+        messageId: messageId,
+        newMessage: newMessage,
       });
 
       if (thinkingIntervalRef.current) {

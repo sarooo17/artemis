@@ -2,40 +2,26 @@ import { Request, Response, NextFunction } from 'express';
 import { TokenService } from '../services/token.service';
 import { prisma } from '../config/database';
 
-export interface AuthRequest extends Request {
-  user?: {
-    id: string;
-    email: string;
-    hashedPassword: string;
-    firstName: string;
-    lastName: string;
-    role: string;
-    companyId: string | null;
-    isTwoFactorEnabled: boolean;
-    twoFactorSecret: string | null;
-    createdAt: Date;
-    updatedAt: Date;
-  };
-}
-
 /**
  * Middleware to require authentication
  * Validates JWT access token and attaches user to request
  */
 export async function requireAuth(
-  req: AuthRequest,
+  req: Request,
   res: Response,
   next: NextFunction
 ): Promise<void> {
   try {
-    const authHeader = req.headers.authorization;
+    // Get access token from HttpOnly cookie (preferred) or Authorization header (fallback)
+    const token = req.cookies.accessToken || 
+                  (req.headers.authorization?.startsWith('Bearer ') 
+                    ? req.headers.authorization.substring(7) 
+                    : null);
 
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    if (!token) {
       res.status(401).json({ error: 'Unauthorized', message: 'No token provided' });
       return;
     }
-
-    const token = authHeader.substring(7); // Remove 'Bearer ' prefix
 
     const payload = TokenService.verifyAccessToken(token);
 
@@ -67,7 +53,7 @@ export async function requireAuth(
  * Optional auth - doesn't fail if no token, just doesn't set user
  */
 export async function optionalAuth(
-  req: AuthRequest,
+  req: Request,
   res: Response,
   next: NextFunction
 ): Promise<void> {

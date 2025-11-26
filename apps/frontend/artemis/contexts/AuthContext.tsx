@@ -1,6 +1,7 @@
 'use client';
 
 import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import { api } from '@/lib/api';
 
 interface User {
   id: string;
@@ -14,7 +15,6 @@ interface User {
 
 interface AuthContextType {
   user: User | null;
-  accessToken: string | null;
   isLoading: boolean;
   isAuthenticated: boolean;
   login: (email: string, password: string) => Promise<void>;
@@ -26,7 +26,6 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
-  const [accessToken, setAccessToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
   // Check if user is authenticated on mount
@@ -34,18 +33,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     checkAuth();
   }, []);
 
-  // Save access token to localStorage when it changes
-  useEffect(() => {
-    if (accessToken) {
-      localStorage.setItem('accessToken', accessToken);
-    } else {
-      localStorage.removeItem('accessToken');
-    }
-  }, [accessToken]);
-
   // Set up token refresh interval
   useEffect(() => {
-    if (!accessToken) return;
+    if (!user) return;
 
     // Refresh token every 10 minutes (access token expires in 15)
     const interval = setInterval(() => {
@@ -53,25 +43,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }, 10 * 60 * 1000);
 
     return () => clearInterval(interval);
-  }, [accessToken]);
+  }, [user]);
 
   async function checkAuth() {
     try {
-      // Load access token from localStorage
-      const storedToken = localStorage.getItem('accessToken');
-      if (!storedToken) {
-        setIsLoading(false);
-        return;
-      }
-      
-      setAccessToken(storedToken);
-
-      const response = await fetch('http://localhost:3001/api/auth/me', {
-        credentials: 'include',
-        headers: {
-          'Authorization': `Bearer ${storedToken}`,
-        },
-      });
+      const response = await api.get('/auth/me');
 
       if (response.ok) {
         const data = await response.json();
@@ -81,25 +57,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const refreshed = await refreshToken();
         if (!refreshed) {
           setUser(null);
-          setAccessToken(null);
         }
       }
     } catch (error) {
       console.error('Auth check failed:', error);
       setUser(null);
-      setAccessToken(null);
     } finally {
       setIsLoading(false);
     }
   }
 
   async function login(email: string, password: string) {
-    const response = await fetch('http://localhost:3001/api/auth/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({ email, password }),
-    });
+    const response = await api.post('/auth/login', { email, password });
 
     if (!response.ok) {
       const error = await response.json();
@@ -108,21 +77,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const data = await response.json();
     setUser(data.user);
-    setAccessToken(data.accessToken);
 
     // Claim any anonymous sessions
     const tempSessionId = sessionStorage.getItem('temp_session_id');
     if (tempSessionId) {
       try {
-        await fetch('http://localhost:3001/api/chat/claim-sessions', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${data.accessToken}`,
-          },
-          credentials: 'include',
-          body: JSON.stringify({ tempSessionId }),
-        });
+        await api.post('/chat/claim-sessions', { tempSessionId });
         sessionStorage.removeItem('temp_session_id');
       } catch (error) {
         console.error('Failed to claim sessions:', error);
@@ -132,39 +92,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   async function logout() {
     try {
-      await fetch('http://localhost:3001/api/auth/logout', {
-        method: 'POST',
-        credentials: 'include',
-      });
+      await api.post('/auth/logout');
     } catch (error) {
       console.error('Logout failed:', error);
     } finally {
       setUser(null);
-      setAccessToken(null);
     }
   }
 
   async function refreshToken(): Promise<boolean> {
     try {
-      const response = await fetch('http://localhost:3001/api/auth/refresh', {
-        method: 'POST',
-        credentials: 'include',
-      });
+      const response = await api.post('/auth/refresh');
 
       if (!response.ok) {
         return false;
       }
 
-      const data = await response.json();
-      setAccessToken(data.accessToken);
-
       // Recheck user data
-      const meResponse = await fetch('http://localhost:3001/api/auth/me', {
-        credentials: 'include',
-        headers: {
-          'Authorization': `Bearer ${data.accessToken}`,
-        },
-      });
+      const meResponse = await api.get('/auth/me');
 
       if (meResponse.ok) {
         const meData = await meResponse.json();
@@ -182,7 +127,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     <AuthContext.Provider
       value={{
         user,
-        accessToken,
         isLoading,
         isAuthenticated: !!user,
         login,

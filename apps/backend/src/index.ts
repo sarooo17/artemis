@@ -1,9 +1,12 @@
 import express, { Express, Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
-import rateLimit from 'express-rate-limit';
 import { env } from './config/env';
 import { prisma } from './config/database';
+import { connectRedis, disconnectRedis } from './config/redis';
+import { verifyCsrfToken } from './middleware/csrf.middleware';
+import { requireAuth } from './middleware/auth.middleware';
+import { userRateLimiter, authRateLimiter } from './middleware/rate-limit.middleware';
 import authRoutes from './routes/auth.routes';
 import chatRoutes from './routes/chat.routes';
 import settingsRoutes from './routes/settings.routes';
@@ -13,13 +16,6 @@ import dashboardRoutes from './routes/dashboard.routes';
 
 const app: Express = express();
 
-// Rate limiting - più permissivo in development
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: env.NODE_ENV === 'production' ? 100 : 1000, // 1000 requests in dev, 100 in production
-  message: 'Too many requests from this IP, please try again later.',
-});
-
 // Middleware
 app.use(cors({
   origin: env.FRONTEND_URL,
@@ -28,7 +24,6 @@ app.use(cors({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
-app.use('/api/', limiter);
 
 // Health check
 app.get('/health', (req: Request, res: Response) => {
@@ -36,12 +31,16 @@ app.get('/health', (req: Request, res: Response) => {
 });
 
 // Routes
-app.use('/api/auth', authRoutes);
-app.use('/api/chat', chatRoutes);
-app.use('/api/settings', settingsRoutes);
-app.use('/api/user', userRoutes);
-app.use('/api/search', searchRoutes);
-app.use('/api/dashboard', dashboardRoutes);
+// Auth routes: IP-based rate limiting (before authentication)
+app.use('/api/auth', authRateLimiter, authRoutes);
+
+// Protected routes: Per-user rate limiting (after authentication)
+// Order: requireAuth → userRateLimiter → verifyCsrfToken → route handler
+app.use('/api/chat', requireAuth, userRateLimiter, verifyCsrfToken, chatRoutes);
+app.use('/api/settings', requireAuth, userRateLimiter, verifyCsrfToken, settingsRoutes);
+app.use('/api/user', requireAuth, userRateLimiter, verifyCsrfToken, userRoutes);
+app.use('/api/dashboard', requireAuth, userRateLimiter, verifyCsrfToken, dashboardRoutes);
+app.use('/api/search', requireAuth, userRateLimiter, searchRoutes); // Read-only, no CSRF
 
 // 404 handler
 app.use((req: Request, res: Response) => {
@@ -66,6 +65,9 @@ async function startServer() {
     await prisma.$connect();
     console.log('✅ Database connected');
 
+    // Connect to Redis (optional, continues without Redis if fails in dev)
+    await connectRedis();
+
     app.listen(PORT, () => {
       console.log(`🚀 Server running on http://localhost:${PORT}`);
       console.log(`📝 Environment: ${env.NODE_ENV}`);
@@ -81,12 +83,14 @@ async function startServer() {
 process.on('SIGINT', async () => {
   console.log('\n👋 Shutting down gracefully...');
   await prisma.$disconnect();
+  await disconnectRedis();
   process.exit(0);
 });
 
 process.on('SIGTERM', async () => {
   console.log('\n👋 Shutting down gracefully...');
   await prisma.$disconnect();
+  await disconnectRedis();
   process.exit(0);
 });
 

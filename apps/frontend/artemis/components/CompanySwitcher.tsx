@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { api } from '@/lib/api';
 
 interface Company {
   id: string;
@@ -50,12 +51,7 @@ export default function CompanySwitcher({ isOpen, onClose, onSwitch, isNavExpand
     setLoading(true);
     setError("");
     try {
-      const token = localStorage.getItem('accessToken');
-      const response = await fetch('http://localhost:3001/api/user/available-contexts', {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-      });
+      const response = await api.get('/user/available-contexts');
 
       if (!response.ok) {
         throw new Error('Failed to load contexts');
@@ -97,17 +93,9 @@ export default function CompanySwitcher({ isOpen, onClose, onSwitch, isNavExpand
     setSwitching(true);
     setError("");
     try {
-      const token = localStorage.getItem('accessToken');
-      const response = await fetch('http://localhost:3001/api/user/switch-context', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          companyId: selectedCompanyId,
-          departmentId: selectedDepartmentId,
-        }),
+      const response = await api.post('/user/switch-context', {
+        companyId: selectedCompanyId,
+        departmentId: selectedDepartmentId,
       });
 
       if (!response.ok) {

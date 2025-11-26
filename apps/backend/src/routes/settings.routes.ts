@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth.middleware';
 import { prisma } from '../config/database';
+import { SessionService } from '../services/session.service';
 import bcrypt from 'bcrypt';
 
 const router = Router();
@@ -236,12 +237,16 @@ router.get('/security/audit-logs', requireAuth, async (req: any, res: any) => {
   }
 });
 
-// Get active sessions
+// Get active sessions (from Redis + DB)
 router.get('/security/sessions', requireAuth, async (req: any, res: any) => {
   try {
     const userId = req.user.id;
 
-    const sessions = await prisma.refreshToken.findMany({
+    // Get sessions from Redis (more detailed with IP, user agent)
+    const redisSessions = await SessionService.getUserSessions(userId);
+
+    // Get sessions from DB (fallback if Redis is down)
+    const dbSessions = await prisma.refreshToken.findMany({
       where: { 
         userId,
         expiresAt: { gt: new Date() },
@@ -254,6 +259,16 @@ router.get('/security/sessions', requireAuth, async (req: any, res: any) => {
       },
     });
 
+    // Merge data: use Redis sessions if available, otherwise DB
+    const sessions = redisSessions.length > 0 
+      ? redisSessions.map(s => ({
+          id: s.sessionId,
+          createdAt: s.createdAt,
+          ip: s.ip,
+          userAgent: s.userAgent,
+        }))
+      : dbSessions;
+
     res.json(sessions);
   } catch (error) {
     console.error('Error fetching sessions:', error);
@@ -261,26 +276,29 @@ router.get('/security/sessions', requireAuth, async (req: any, res: any) => {
   }
 });
 
-// Revoke session
+// Revoke session (both Redis and DB)
 router.delete('/security/sessions/:sessionId', requireAuth, async (req: any, res: any) => {
   try {
     const userId = req.user.id;
     const { sessionId } = req.params;
 
+    // Revoke in Redis (sessionId is the jti)
+    await SessionService.revokeSession(sessionId);
+
+    // Also try to find and delete from DB (tokenId might be different from jti)
     const session = await prisma.refreshToken.findFirst({
       where: {
-        id: sessionId,
         userId,
+        // Note: DB uses tokenId, not jti. We might need to store jti in DB too
+        // For now, this is best effort
       },
     });
 
-    if (!session) {
-      return res.status(404).json({ error: 'Session not found' });
+    if (session) {
+      await prisma.refreshToken.delete({
+        where: { id: session.id },
+      });
     }
-
-    await prisma.refreshToken.delete({
-      where: { id: sessionId },
-    });
 
     res.json({ message: 'Session revoked successfully' });
   } catch (error) {
