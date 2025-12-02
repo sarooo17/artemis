@@ -1,6 +1,19 @@
 import { z } from 'zod';
 
 /**
+ * UI Context validation schema
+ */
+export const uiContextSchema = z.object({
+  currentRoute: z.string().optional(),
+  entityId: z.string().optional(),
+  entityType: z.string().optional(),
+  filters: z.record(z.any()).optional(),
+  layoutMode: z.enum(['immersive', 'split', 'minimized']).optional(),
+  viewportWidth: z.number().positive().optional(),
+  viewportHeight: z.number().positive().optional(),
+}).optional();
+
+/**
  * Settings validation schemas
  */
 
@@ -73,6 +86,7 @@ export const createWidgetSchema = z.object({
 export const sendMessageSchema = z.object({
   sessionId: z.string().optional(),
   message: z.string().min(1).max(10000),
+  uiContext: uiContextSchema,
 });
 
 export const forkChatSchema = z.object({

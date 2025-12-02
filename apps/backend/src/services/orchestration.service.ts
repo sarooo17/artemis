@@ -1,7 +1,23 @@
 import OpenAI from 'openai';
+import { zodToJsonSchema } from 'zod-to-json-schema';
 import { env } from '../config/env';
 import { fluentisService } from './fluentis.service';
 import { c1Service } from './c1.service';
+import type { RequestContext } from '../types/context.types';
+import { getApiCatalogDescription, getApiEndpoint, type ApiEndpoint } from '../config/api-catalog';
+import {
+  type OrchestrationOutput,
+  type ApiCall,
+  type ResponseFormat,
+  ORCHESTRATION_OUTPUT_SCHEMA,
+} from '../types/orchestration.types';
+import {
+  CreateSalesOrderSchema,
+  CreateCustomerSchema,
+  UpdateCustomerSchema,
+  CreateItemSchema,
+  UpdateStockSchema,
+} from '../validators/action.validators';
 
 /**
  * OpenAI Orchestration Service
@@ -19,98 +35,24 @@ interface Message {
 interface OrchestrationOptions {
   conversationHistory?: Message[];
   sessionId?: string;
+  context?: any; // RequestContext from middleware
+  currentUIContent?: string; // Existing UI for incremental updates
 }
 
 interface OrchestrationResult {
   type: 'text' | 'ui';
   content: string;
+  layoutIntent?: 'full' | 'extended' | 'preview' | 'hidden';
   toolCalls?: any[];
   data?: any;
+  thinking?: string;
 }
 
-// Define available tools for OpenAI function calling
-const FLUENTIS_TOOLS: OpenAI.ChatCompletionTool[] = [
-  {
-    type: 'function',
-    function: {
-      name: 'export_sales_orders',
-      description: 'Export sales orders from Fluentis ERP. Use this when user asks about sales, orders, or revenue.',
-      parameters: {
-        type: 'object',
-        properties: {
-          dateFrom: {
-            type: 'string',
-            description: 'Start date in format YYYY-MM-DD',
-          },
-          dateTo: {
-            type: 'string',
-            description: 'End date in format YYYY-MM-DD',
-          },
-          customerId: {
-            type: 'string',
-            description: 'Optional customer ID to filter by',
-          },
-        },
-        required: [],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_stock_levels',
-      description: 'Get current stock/inventory levels from Fluentis warehouse. Use when user asks about inventory, stock, or availability.',
-      parameters: {
-        type: 'object',
-        properties: {
-          itemCode: {
-            type: 'string',
-            description: 'Optional item code to filter by specific product',
-          },
-        },
-        required: [],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'export_items',
-      description: 'Export product/item catalog from Fluentis. Use when user asks about products, items, or catalog.',
-      parameters: {
-        type: 'object',
-        properties: {
-          filter: {
-            type: 'string',
-            description: 'Optional DevExpress filter criteria',
-          },
-        },
-        required: [],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'export_customers',
-      description: 'Export customer list from Fluentis. Use when user asks about customers or clients.',
-      parameters: {
-        type: 'object',
-        properties: {
-          filter: {
-            type: 'string',
-            description: 'Optional DevExpress filter criteria',
-          },
-        },
-        required: [],
-      },
-    },
-  },
-];
+// Legacy FLUENTIS_TOOLS removed - OpenAI now uses structured output with API catalog
 
 export class OpenAIOrchestrationService {
   private client: OpenAI;
-  private model = 'gpt-4o-mini'; // Using gpt-4o-mini for function calling
+  private model = 'gpt-4o-mini'; // Using gpt-4o-mini for structured output
 
   constructor() {
     this.client = new OpenAI({
@@ -119,33 +61,219 @@ export class OpenAIOrchestrationService {
   }
 
   /**
-   * Main orchestration method
-   * 1. Analyze user intent with function calling
-   * 2. Execute Fluentis tools if needed
-   * 3. Route to C1 for UI generation or return text response
+   * Parse structured response from OpenAI
+   */
+  private parseStructuredResponse(content: string): {
+    layoutIntent: 'full' | 'extended' | 'preview' | 'hidden';
+    response: string;
+    thinking?: string;
+    suggestUI?: boolean;
+  } {
+    try {
+      const parsed = JSON.parse(content);
+      return {
+        layoutIntent: parsed.layoutIntent || 'extended',
+        response: parsed.response || content,
+        thinking: parsed.thinking,
+        suggestUI: parsed.suggestUI,
+      };
+    } catch (error) {
+      // Fallback: try to extract layout intent with regex if JSON parsing fails
+      const layoutRegex = /\[LAYOUT:(full|extended|preview|hidden)\]/i;
+      const match = content.match(layoutRegex);
+      
+      return {
+        layoutIntent: match ? (match[1].toLowerCase() as 'full' | 'extended' | 'preview' | 'hidden') : 'extended',
+        response: content.replace(layoutRegex, '').trim(),
+      };
+    }
+  }
+
+  /**
+   * Build context-aware system prompt
+   */
+  private buildSystemPrompt(context?: RequestContext, hasExistingUI?: boolean): string {
+    const uiModificationGuidelines = hasExistingUI ? `
+
+## UI Modification Guidelines (IMPORTANT - User has existing UI displayed)
+The user currently has an interactive UI/dashboard displayed. When they ask to:
+- **"Add X"** or **"Show also Y"**: Fetch any needed data and generate UI that INCLUDES the new elements
+- **"Modify/Change X"**: Fetch updated data if needed and regenerate UI with modifications
+- **"Remove X"**: Generate UI without the unwanted elements
+- **"Add chart/graph for Z"**: Fetch the necessary data for Z (don't ask user to provide it), then generate enhanced UI
+
+CRITICAL: When user asks to add charts/analysis:
+1. Identify what data is needed (e.g., prices for value calculation)
+2. Call the appropriate read tools to get that data (e.g., get_items for prices)
+3. Perform calculations yourself (e.g., quantity * price = value)
+4. Generate UI with the complete analysis
+
+DO NOT ask the user to provide data that you can fetch yourself!
+` : '';
+
+    const basePrompt = `You are Artemis, an intelligent Context-Aware Operating System that acts as the BRAIN for planning and orchestration.
+
+## Your Role (CRITICAL)
+You are the ORCHESTRATOR, not the executor:
+1. **Analyze** user intent and context
+2. **Decide** which APIs to call (from catalog below)
+3. **Plan** the response format (text/ui/form)
+4. **Specify** WHAT to show/do (not HOW to implement)
+
+Backend will EXECUTE the API calls and generate the actual UI/forms based on your decisions.
+
+${getApiCatalogDescription()}
+
+## Response Format (Structured Output)
+You MUST respond with structured JSON:
+- responseFormat: 'text' | 'ui' | 'form'
+  * text: Simple answer without data visualization
+  * ui: Data visualization needed (charts/tables/cards)
+  * form: Write operation needs user input
+- layoutIntent: 'full' | 'extended' | 'preview' | 'hidden'
+  * full: Fullscreen chat for complex conversations
+  * extended: Large overlay for explanations with UI
+  * preview: Compact for quick answers
+  * hidden: UI only, hide chat
+- textResponse: Your text response to user
+- apiCalls: Array of APIs to call (optional)
+  * [{apiId, reason, parameters}]
+- uiSpec: UI specification if responseFormat='ui' (WHAT to show)
+  * {type, dataDescription, highlights, chartType, groupBy, sortBy}
+- formSpec: Form specification if responseFormat='form'
+  * {actionType, title, description, prefillData}
+- thinking: (optional) Your reasoning for transparency
+
+## Write Operations (CRITICAL)
+When user wants to CREATE, ADD, UPDATE, or MODIFY data:
+1. **ALWAYS** set responseFormat='form' (not 'ui' or 'text')
+2. Specify formSpec with actionType (from: create_sales_order, create_customer, update_customer, create_item, update_stock)
+3. Include prefillData if you can infer values from context
+4. Backend will generate form → user fills → validates → executes
+
+Examples that require 'form':
+- "Create new order" → responseFormat='form', actionType='create_sales_order'
+- "Add new customer" → responseFormat='form', actionType='create_customer'
+- "New article/item" → responseFormat='form', actionType='create_item'
+- "Update stock" → responseFormat='form', actionType='update_stock'
+- "Modify customer info" → responseFormat='form', actionType='update_customer'
+- User clicks "Nuovo Articolo" button → responseFormat='form', actionType='create_item'
+
+DO NOT use responseFormat='ui' or 'text' for write operations!
+${uiModificationGuidelines}`;
+
+    if (!context) {
+      return basePrompt;
+    }
+
+    // Build context sections
+    const contextSections: string[] = [];
+
+    // User Context
+    if (context.user) {
+      contextSections.push(`\n\n## Current User Context\n- Name: ${context.user.name}\n- Email: ${context.user.email}`);
+      
+      if (context.user.role) {
+        contextSections.push(`- Role: ${context.user.role.name}\n- Department: ${context.user.role.departmentName}`);
+        if (context.user.role.permissions && context.user.role.permissions.length > 0) {
+          contextSections.push(`- Permissions: ${context.user.role.permissions.slice(0, 5).join(', ')}${context.user.role.permissions.length > 5 ? '...' : ''}`);
+        }
+      }
+      
+      if (context.user.settings) {
+        contextSections.push(`- Language: ${context.user.settings.language}\n- Timezone: ${context.user.settings.timezone}`);
+      }
+      
+      // User AI Preferences (Long-term Memory)
+      if (context.user.preferences) {
+        const prefs = context.user.preferences;
+        contextSections.push(`\n## User Preferences (Remember these)`);
+        if (prefs.defaultChartType) contextSections.push(`- Prefers ${prefs.defaultChartType} charts`);
+        if (prefs.defaultDateRange) contextSections.push(`- Default date range: ${prefs.defaultDateRange}`);
+        if (prefs.defaultTablePageSize) contextSections.push(`- Table page size: ${prefs.defaultTablePageSize}`);
+        if (prefs.preferredWarehouse) contextSections.push(`- Preferred warehouse: ${prefs.preferredWarehouse}`);
+        if (prefs.favoriteCustomers && Array.isArray(prefs.favoriteCustomers) && prefs.favoriteCustomers.length > 0) {
+          contextSections.push(`- Favorite customers: ${prefs.favoriteCustomers.slice(0, 5).join(', ')}`);
+        }
+        if (prefs.favoriteItems && Array.isArray(prefs.favoriteItems) && prefs.favoriteItems.length > 0) {
+          contextSections.push(`- Favorite items: ${prefs.favoriteItems.slice(0, 5).join(', ')}`);
+        }
+        if (prefs.frequentQueries && Array.isArray(prefs.frequentQueries) && prefs.frequentQueries.length > 0) {
+          contextSections.push(`- Frequently asks about: ${prefs.frequentQueries.map((q: any) => q.query).slice(0, 3).join(', ')}`);
+        }
+      }
+    }
+
+    // Company Context
+    if (context.company) {
+      contextSections.push(`\n\n## Company Context\n- Company: ${context.company.name}`);
+      if (context.company.sector) {
+        contextSections.push(`- Sector: ${context.company.sector}`);
+      }
+      if (context.company.fluentisCompanyCode || context.company.fluentisDepartmentCode) {
+        contextSections.push(`- Fluentis: Company=${context.company.fluentisCompanyCode || 'N/A'}, Department=${context.company.fluentisDepartmentCode || 'N/A'}`);
+      }
+    }
+
+    // UI Context
+    if (context.ui) {
+      contextSections.push(`\n\n## Current UI Context`);
+      if (context.ui.currentRoute) {
+        contextSections.push(`- Current Route: ${context.ui.currentRoute}`);
+      }
+      if (context.ui.entityId) {
+        contextSections.push(`- Viewing Entity: ${context.ui.entityId} (${context.ui.entityType || 'unknown'})`);
+      }
+      if (context.ui.filters && Object.keys(context.ui.filters).length > 0) {
+        contextSections.push(`- Active Filters: ${JSON.stringify(context.ui.filters)}`);
+      }
+      if (context.ui.layoutMode) {
+        contextSections.push(`- Layout Mode: ${context.ui.layoutMode}`);
+      }
+    }
+
+    // External Context (Time)
+    if (context.external) {
+      contextSections.push(`\n\n## Time Context\n- Current Date: ${context.external.date.formatted}\n- Current Time: ${context.external.time.formatted}`);
+      if (context.external.date.dayOfWeek) {
+        contextSections.push(`- Day: ${context.external.date.dayOfWeek}`);
+      }
+      if (context.external.timezone) {
+        contextSections.push(`- Timezone: ${context.external.timezone.name}`);
+      }
+    }
+
+    // Session Context
+    if (context.session) {
+      contextSections.push(`\n\n## Session Context\n- Session ID: ${context.session.id}`);
+      if (context.session.title) {
+        contextSections.push(`- Title: ${context.session.title}`);
+      }
+      if (context.session.messageCount) {
+        contextSections.push(`- Messages: ${context.session.messageCount}`);
+      }
+    }
+
+    return basePrompt + contextSections.join('');
+  }
+
+  /**
+   * Main orchestration method with structured output
+   * 1. OpenAI decides WHAT to do (structured output)
+   * 2. Backend executes API calls
+   * 3. Route to C1 for UI generation or return text
    */
   async orchestrate(
     userPrompt: string,
     options: OrchestrationOptions = {}
   ): Promise<OrchestrationResult> {
-    const { conversationHistory = [] } = options;
+    const { conversationHistory = [], context, currentUIContent } = options;
 
-    // Build messages with system prompt
+    // Build messages with context-aware system prompt
     const messages: Message[] = [
       {
         role: 'system',
-        content: `You are an intelligent assistant that helps users query their Fluentis ERP system and visualize data.
-
-When users ask about business data (sales, inventory, customers, products), use the available tools to fetch the data.
-After fetching data, always suggest creating a visualization or UI to display it effectively.
-
-Available data sources:
-- Sales orders (export_sales_orders)
-- Stock/inventory levels (get_stock_levels)
-- Product catalog (export_items)
-- Customer list (export_customers)
-
-If user asks for visualizations or UI, you'll receive the data and can describe what to show.`,
+        content: this.buildSystemPrompt(context as RequestContext, !!currentUIContent),
       },
       ...conversationHistory,
       {
@@ -155,122 +283,97 @@ If user asks for visualizations or UI, you'll receive the data and can describe 
     ];
 
     try {
-      // Step 1: Call OpenAI with function calling
-      console.log('🤖 OpenAI orchestration started...');
+      // Step 1: Call OpenAI with structured output
+      console.log('🤖 OpenAI orchestration (structured)...');
       console.log('📝 Request:', {
         model: this.model,
-        toolsCount: FLUENTIS_TOOLS.length,
         userPrompt: userPrompt.substring(0, 100),
       });
       
       const response = await this.client.chat.completions.create({
         model: this.model,
         messages: messages as any,
-        tools: FLUENTIS_TOOLS,
-        tool_choice: 'auto',
+        response_format: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'orchestration_output',
+            strict: true,
+            schema: ORCHESTRATION_OUTPUT_SCHEMA,
+          },
+        },
       });
 
-      const assistantMessage = response.choices[0].message;
-      const toolCalls = assistantMessage.tool_calls;
+      const content = response.choices[0].message.content;
+      if (!content) {
+        throw new Error('No response from OpenAI');
+      }
 
-      console.log('📨 Response:', {
-        hasToolCalls: !!toolCalls,
-        toolCallsCount: toolCalls?.length || 0,
-        content: assistantMessage.content?.substring(0, 100),
+      const orchestrationOutput: OrchestrationOutput = JSON.parse(content);
+
+      console.log('📨 OpenAI Decision:', {
+        responseFormat: orchestrationOutput.responseFormat,
+        layoutIntent: orchestrationOutput.layoutIntent,
+        apiCalls: orchestrationOutput.apiCalls?.length || 0,
+        hasUiSpec: !!orchestrationOutput.uiSpec,
+        hasFormSpec: !!orchestrationOutput.formSpec,
+        thinking: orchestrationOutput.thinking?.substring(0, 100),
       });
 
-      // Step 2: Execute tool calls if present
-      if (toolCalls && toolCalls.length > 0) {
-        console.log(`🔧 Executing ${toolCalls.length} tool call(s)...`);
-        
-        const toolMessages: Message[] = [];
-        let fetchedData: any = null;
+      // Step 2: Execute API calls if specified
+      let fetchedData: any = null;
+      if (orchestrationOutput.apiCalls && orchestrationOutput.apiCalls.length > 0) {
+        console.log(`🔧 Executing ${orchestrationOutput.apiCalls.length} API call(s)...`);
+        fetchedData = await this.executeApiCalls(orchestrationOutput.apiCalls, context as RequestContext);
+      }
 
-        for (const toolCall of toolCalls) {
-          if (toolCall.type !== 'function') continue;
-          const functionName = toolCall.function.name;
-          const functionArgs = JSON.parse(toolCall.function.arguments);
-
-          console.log(`   → ${functionName}`, functionArgs);
-
-          let result: any;
-
-          try {
-            // Execute the appropriate Fluentis function
-            result = await this.executeFluentisFunction(functionName, functionArgs);
-            fetchedData = result; // Store for UI generation
-          } catch (error: any) {
-            result = { error: error.message };
-            console.error(`   ✗ Tool execution failed:`, error.message);
-          }
-
-          // Add tool result to messages
-          toolMessages.push({
-            role: 'tool',
-            tool_call_id: toolCall.id,
-            name: functionName,
-            content: JSON.stringify(result),
-          });
-        }
-
-        // Step 3: Determine if UI generation is needed
-        const requiresUI = c1Service.requiresUI(userPrompt);
-
-        if (requiresUI && fetchedData) {
+      // Step 3: Route based on response format
+      switch (orchestrationOutput.responseFormat) {
+        case 'ui':
+          // Generate UI with C1 based on uiSpec
           console.log('🎨 Generating UI with C1...');
-          
-          // Use C1 to generate UI
           const uiContent = await c1Service.generateUI({
             prompt: userPrompt,
-            data: fetchedData,
+            data: fetchedData || {},
             conversationHistory: conversationHistory as any,
+            uiSpec: orchestrationOutput.uiSpec,
           });
 
           return {
             type: 'ui',
             content: uiContent,
-            toolCalls: toolCalls
-              .filter(tc => tc.type === 'function')
-              .map(tc => ({
-                name: tc.function.name,
-                arguments: JSON.parse(tc.function.arguments),
-              })),
+            layoutIntent: orchestrationOutput.layoutIntent,
+            thinking: orchestrationOutput.thinking,
             data: fetchedData,
           };
-        } else {
-          // Continue conversation with OpenAI for text response
-          console.log('💬 Generating text response...');
-          
-          const followUpResponse = await this.client.chat.completions.create({
-            model: this.model,
-            messages: [
-              ...messages,
-              assistantMessage as any,
-              ...toolMessages as any,
-            ],
+
+        case 'form':
+          // Generate form with C1 based on formSpec
+          console.log('📝 Generating form with C1...');
+          const formContent = await c1Service.generateUI({
+            prompt: userPrompt,
+            data: orchestrationOutput.formSpec,
+            conversationHistory: conversationHistory as any,
+            formSpec: orchestrationOutput.formSpec,
           });
 
           return {
+            type: 'ui', // Forms are rendered as UI
+            content: formContent,
+            layoutIntent: orchestrationOutput.layoutIntent,
+            thinking: orchestrationOutput.thinking,
+          };
+
+        case 'text':
+        default:
+          // Simple text response
+          console.log('💬 Text response');
+          return {
             type: 'text',
-            content: followUpResponse.choices[0].message.content || '',
-            toolCalls: toolCalls
-              .filter(tc => tc.type === 'function')
-              .map(tc => ({
-                name: tc.function.name,
-                arguments: JSON.parse(tc.function.arguments),
-              })),
+            content: orchestrationOutput.textResponse,
+            layoutIntent: orchestrationOutput.layoutIntent,
+            thinking: orchestrationOutput.thinking,
             data: fetchedData,
           };
-        }
-      } else {
-        // No tool calls - simple text response
-        console.log('💬 Simple text response (no tools needed)');
-        
-        return {
-          type: 'text',
-          content: assistantMessage.content || '',
-          toolCalls: [],
-        };
       }
     } catch (error: any) {
       console.error('❌ Orchestration error:', error.message);
@@ -279,32 +382,290 @@ If user asks for visualizations or UI, you'll receive the data and can describe 
   }
 
   /**
-   * Execute Fluentis function based on tool call
+   * Classify error type for retry logic
    */
-  private async executeFluentisFunction(
-    functionName: string,
-    args: Record<string, any>
-  ): Promise<any> {
-    switch (functionName) {
-      case 'export_sales_orders':
-        return await fluentisService.exportSales({
-          dateFrom: args.dateFrom,
-          dateTo: args.dateTo,
-          customerId: args.customerId,
-        });
-
-      case 'get_stock_levels':
-        return await fluentisService.getStockLevels(args.itemCode);
-
-      case 'export_items':
-        return await fluentisService.exportItems(args.filter);
-
-      case 'export_customers':
-        return await fluentisService.exportCustomers(args.filter);
-
-      default:
-        throw new Error(`Unknown function: ${functionName}`);
+  private classifyError(error: any, apiId: string): 'retriable' | 'fatal' {
+    const errorMsg = error.message?.toLowerCase() || '';
+    
+    // Network/timeout errors - retriable
+    if (
+      errorMsg.includes('timeout') ||
+      errorMsg.includes('econnrefused') ||
+      errorMsg.includes('econnreset') ||
+      errorMsg.includes('network') ||
+      error.code === 'ETIMEDOUT' ||
+      error.code === 'ECONNREFUSED'
+    ) {
+      return 'retriable';
     }
+    
+    // Rate limiting - retriable
+    if (errorMsg.includes('rate limit') || errorMsg.includes('too many requests')) {
+      return 'retriable';
+    }
+    
+    // Validation errors - fatal (need user clarification)
+    if (
+      errorMsg.includes('validation') ||
+      errorMsg.includes('invalid') ||
+      errorMsg.includes('required') ||
+      errorMsg.includes('missing parameter')
+    ) {
+      return 'fatal';
+    }
+    
+    // Authentication errors - fatal
+    if (
+      errorMsg.includes('unauthorized') ||
+      errorMsg.includes('forbidden') ||
+      errorMsg.includes('authentication')
+    ) {
+      return 'fatal';
+    }
+    
+    // Default: retriable for safety (server errors might be transient)
+    return 'retriable';
+  }
+
+  /**
+   * Execute single API call with retry logic and exponential backoff
+   */
+  private async executeApiCallWithRetry(
+    apiCall: ApiCall,
+    context?: RequestContext,
+    maxRetries: number = 3
+  ): Promise<any> {
+    const endpoint = getApiEndpoint(apiCall.apiId);
+    if (!endpoint) {
+      throw new Error(`Unknown API: ${apiCall.apiId}`);
+    }
+
+    let lastError: any;
+    
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        console.log(`[API] ${apiCall.apiId} - Attempt ${attempt}/${maxRetries}`);
+        
+        let result: any;
+        const p = apiCall.parameters as any;
+
+        // Execute based on endpoint (same switch as before)
+        switch (apiCall.apiId) {
+          case 'export_sales_orders':
+            result = await fluentisService.exportSalesOrders({ ...p, context });
+            break;
+          case 'export_items':
+            result = await fluentisService.exportItems({ ...p, context });
+            break;
+          case 'export_customers':
+            result = await fluentisService.exportContacts({ ...p, contactType: 'Customer', context });
+            break;
+          case 'export_stock_levels':
+            result = await fluentisService.getItemsStock({ ...p, context });
+            break;
+          case 'check_item_availability':
+            result = await fluentisService.getItemsAvailability(
+              [{ itemCode: p.itemCode, requestedQuantity: p.requestedQuantity, warehouseCode: p.warehouseCode }],
+              { context }
+            );
+            break;
+          case 'get_customer_orders':
+            result = await fluentisService.exportSalesOrders({ ...p, context });
+            break;
+          case 'create_sales_order':
+            result = await fluentisService.createSalesOrder({ ...p, context });
+            break;
+          case 'create_customer':
+            result = await fluentisService.createCustomer({ ...p, context });
+            break;
+          case 'update_customer':
+            result = await fluentisService.updateCustomer({ ...p, context });
+            break;
+          case 'create_item':
+            result = await fluentisService.createItem({ ...p, context });
+            break;
+          case 'update_stock':
+            result = await fluentisService.updateStock({ ...p, context });
+            break;
+          default:
+            throw new Error(`API ${apiCall.apiId} not yet implemented`);
+        }
+
+        console.log(`✅ [API Success] ${apiCall.apiId}`);
+        return result;
+        
+      } catch (error: any) {
+        lastError = error;
+        const errorType = this.classifyError(error, apiCall.apiId);
+        
+        console.error(`❌ [API Error] ${apiCall.apiId} (${errorType}):`, error.message);
+        
+        // Don't retry fatal errors or last attempt
+        if (errorType === 'fatal' || attempt === maxRetries) {
+          throw error;
+        }
+        
+        // Exponential backoff: 1s, 2s, 4s
+        const backoffMs = Math.pow(2, attempt - 1) * 1000;
+        console.log(`⏳ Retry in ${backoffMs}ms...`);
+        await new Promise(resolve => setTimeout(resolve, backoffMs));
+      }
+    }
+    
+    throw lastError;
+  }
+
+  /**
+   * Execute API calls from OpenAI's decision with retry logic
+   * Replaces executeFluentisFunction - now uses API catalog
+   */
+  private async executeApiCalls(
+    apiCalls: ApiCall[],
+    context?: RequestContext
+  ): Promise<{ [key: string]: any }> {
+    const results: { [key: string]: any } = {};
+    const errors: Array<{ apiId: string; reason: string; error: string; errorType: 'retriable' | 'fatal' }> = [];
+
+    for (const apiCall of apiCalls) {
+      try {
+        const result = await this.executeApiCallWithRetry(apiCall, context);
+        results[apiCall.apiId] = result;
+      } catch (error: any) {
+        const errorType = this.classifyError(error, apiCall.apiId);
+        
+        // Store structured error info
+        errors.push({
+          apiId: apiCall.apiId,
+          reason: apiCall.reason,
+          error: error.message,
+          errorType,
+        });
+        
+        // Include error in results for transparency
+        results[apiCall.apiId] = { 
+          error: error.message, 
+          success: false,
+          errorType,
+        };
+      }
+    }
+
+    // Log summary
+    if (errors.length > 0) {
+      console.warn(`⚠️ [API Execution] ${errors.length}/${apiCalls.length} calls failed`);
+      errors.forEach(e => {
+        console.warn(`  - ${e.apiId} (${e.errorType}): ${e.error}`);
+      });
+    }
+
+    return results;
+  }
+
+  /**
+   * Merge UI components based on REPLACE markers
+   */
+  private mergeUIComponents(baseUI: string, newUI: string): string {
+    // Check if newUI has REPLACE markers
+    const replaceRegex = /<!--\s*REPLACE:\s*(\w+)\s*-->([\s\S]*?)<!--\s*END_REPLACE\s*-->/g;
+    let match;
+    let hasMarkers = false;
+    let mergedUI = baseUI;
+    
+    while ((match = replaceRegex.exec(newUI)) !== null) {
+      hasMarkers = true;
+      const componentName = match[1];
+      const newComponent = match[2].trim();
+      
+      console.log(`[UI Merge] Attempting to replace component: ${componentName}`);
+      
+      // Try to find component in base UI by name/id
+      // This is a simple implementation - looks for component by class or data-component
+      const componentPatterns = [
+        new RegExp(`<div[^>]*className="[^"]*${componentName}[^"]*"[^>]*>[\\s\\S]*?</div>`, 'i'),
+        new RegExp(`<div[^>]*data-component="${componentName}"[^>]*>[\\s\\S]*?</div>`, 'i'),
+        new RegExp(`<!--\\s*${componentName}\\s*-->[\\s\\S]*?<!--\\s*END\\s*${componentName}\\s*-->`, 'i'),
+      ];
+      
+      let replaced = false;
+      for (const pattern of componentPatterns) {
+        if (pattern.test(mergedUI)) {
+          mergedUI = mergedUI.replace(pattern, newComponent);
+          replaced = true;
+          console.log(`[UI Merge] Successfully replaced component: ${componentName}`);
+          break;
+        }
+      }
+      
+      if (!replaced) {
+        console.log(`[UI Merge] Component ${componentName} not found in base UI, appending instead`);
+        mergedUI += '\n\n' + newComponent;
+      }
+    }
+    
+    // If no markers found, append as fallback (same as ADD)
+    if (!hasMarkers) {
+      console.log('[UI Merge] No REPLACE markers found, appending new content');
+      mergedUI = baseUI + '\n\n' + newUI;
+    }
+    
+    return mergedUI;
+  }
+
+  /**
+   * Analyze user intent to determine UI modification strategy
+   */
+  private analyzeUIIntent(userPrompt: string, hasExistingUI: boolean): 'NEW' | 'ADD' | 'MODIFY' | 'REPLACE' {
+    if (!hasExistingUI) return 'NEW';
+    
+    const prompt = userPrompt.toLowerCase();
+    
+    // Keywords for different intents
+    const replaceKeywords = ['ricrea', 'restart', 'nuovo', 'da zero', 'ricomincia', 'cancella tutto', 'reset'];
+    const addKeywords = ['aggiungi', 'add', 'mostra anche', 'includi', 'visualizza anche', 'inserisci'];
+    const modifyKeywords = ['modifica', 'cambia', 'aggiorna', 'sostituisci', 'rimuovi', 'togli', 'elimina'];
+    
+    // Check for complete replacement
+    if (replaceKeywords.some(kw => prompt.includes(kw))) {
+      return 'REPLACE';
+    }
+    
+    // Check for additions
+    if (addKeywords.some(kw => prompt.includes(kw))) {
+      return 'ADD';
+    }
+    
+    // Check for modifications
+    if (modifyKeywords.some(kw => prompt.includes(kw))) {
+      return 'MODIFY';
+    }
+    
+    // Default: treat as new request that might replace
+    return 'REPLACE';
+  }
+
+  // analyzeFormIntent() removed - OpenAI now decides formSpec via structured output
+
+  /**
+   * Get JSON schema from Zod validators for form generation
+   * Directly synced with action.validators.ts
+   */
+  private getSchemaForAction(actionType: string): any {
+    const schemaMap: Record<string, any> = {
+      'create_sales_order': CreateSalesOrderSchema,
+      'create_customer': CreateCustomerSchema,
+      'update_customer': UpdateCustomerSchema,
+      'create_item': CreateItemSchema,
+      'update_stock': UpdateStockSchema,
+    };
+    
+    const zodSchema = schemaMap[actionType];
+    if (!zodSchema) return null;
+    
+    // Convert Zod schema to JSON Schema for OpenAI/C1
+    return zodToJsonSchema(zodSchema, {
+      name: actionType,
+      $refStrategy: 'none', // Inline all definitions
+    });
   }
 
   /**
@@ -314,19 +675,16 @@ If user asks for visualizations or UI, you'll receive the data and can describe 
     userPrompt: string,
     options: OrchestrationOptions = {}
   ): AsyncGenerator<{
-    type: 'thinking' | 'tool_call' | 'data' | 'ui_chunk' | 'text' | 'summary_message';
+    type: 'thinking' | 'tool_call' | 'data' | 'ui_chunk' | 'ui_complete' | 'text' | 'summary_message' | 'ui_action';
     content: any;
   }> {
-    const { conversationHistory = [] } = options;
+    const { conversationHistory = [], context, currentUIContent } = options;
 
-    // Build messages
+    // Build messages with context-aware system prompt
     const messages: Message[] = [
       {
         role: 'system',
-        content: `You are an intelligent assistant that helps users query their Fluentis ERP system and visualize data.
-
-When users ask about business data (sales, inventory, customers, products), use the available tools to fetch the data.
-After fetching data, always suggest creating a visualization or UI to display it effectively.`,
+        content: this.buildSystemPrompt(context as RequestContext, !!currentUIContent),
       },
       ...conversationHistory,
       {
@@ -336,123 +694,160 @@ After fetching data, always suggest creating a visualization or UI to display it
     ];
 
     try {
-      yield { type: 'thinking', content: 'Analyzing request...' };
+      yield { type: 'thinking', content: 'Planning response...' };
 
-      // Call OpenAI with function calling
+      // Step 1: Call OpenAI with structured output for planning
       const response = await this.client.chat.completions.create({
         model: this.model,
         messages: messages as any,
-        tools: FLUENTIS_TOOLS,
-        tool_choice: 'auto',
+        response_format: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'orchestration_output',
+            strict: true,
+            schema: ORCHESTRATION_OUTPUT_SCHEMA,
+          },
+        },
       });
 
-      const assistantMessage = response.choices[0].message;
-      const toolCalls = assistantMessage.tool_calls;
+      const content = response.choices[0].message.content;
+      if (!content) {
+        throw new Error('No response from OpenAI');
+      }
 
-      if (toolCalls && toolCalls.length > 0) {
-        // Execute tools
-        const toolMessages: Message[] = [];
-        let fetchedData: any = null;
+      const orchestrationOutput: OrchestrationOutput = JSON.parse(content);
 
-        for (const toolCall of toolCalls) {
-          if (toolCall.type !== 'function') continue;
-          const functionName = toolCall.function.name;
-          const functionArgs = JSON.parse(toolCall.function.arguments);
+      // Yield thinking if present
+      if (orchestrationOutput.thinking) {
+        yield { type: 'thinking', content: orchestrationOutput.thinking };
+      }
 
-          yield {
-            type: 'tool_call',
-            content: { name: functionName, arguments: functionArgs },
-          };
-
-          const result = await this.executeFluentisFunction(functionName, functionArgs);
-          fetchedData = result;
-
-          yield { type: 'data', content: result };
-
-          toolMessages.push({
-            role: 'tool',
-            tool_call_id: toolCall.id,
-            name: functionName,
-            content: JSON.stringify(result),
-          });
+      // Step 2: Execute API calls if specified
+      let fetchedData: any = null;
+      if (orchestrationOutput.apiCalls && orchestrationOutput.apiCalls.length > 0) {
+        for (const apiCall of orchestrationOutput.apiCalls) {
+          yield { type: 'tool_call', content: { name: apiCall.apiId, reason: apiCall.reason } };
         }
 
-        // Check if UI generation needed
-        const requiresUI = c1Service.requiresUI(userPrompt);
+        yield { type: 'thinking', content: 'Fetching data...' };
+        fetchedData = await this.executeApiCalls(orchestrationOutput.apiCalls, context as RequestContext);
+        yield { type: 'data', content: fetchedData };
+      }
 
-        if (requiresUI && fetchedData) {
-          yield { type: 'thinking', content: 'Generating interactive UI...' };
+      // Step 3: Route based on response format
+      if (orchestrationOutput.responseFormat === 'ui' && orchestrationOutput.uiSpec) {
+        // Generate UI with C1
+        const uiAction = this.analyzeUIIntent(userPrompt, !!options.currentUIContent);
+        
+        yield { 
+          type: 'ui_action', 
+          content: { 
+            action: uiAction,
+            hasExisting: !!options.currentUIContent,
+          } 
+        };
+        
+        yield { type: 'thinking', content: 'Generating interactive UI...' };
 
-          // Stream UI generation FIRST and accumulate full UI content
-          let fullUIContent = '';
-          for await (const chunk of c1Service.generateUIStream({
-            prompt: userPrompt,
-            data: fetchedData,
-            conversationHistory: conversationHistory as any,
-          })) {
-            // Extract only the content string from C1 chunk
-            if (chunk.type === 'artifact' || chunk.type === 'content') {
-              fullUIContent += chunk.content;
-              yield { type: 'ui_chunk', content: chunk.content };
-            }
+        // Build prompt with uiSpec from OpenAI
+        let enhancedPrompt = `${userPrompt}
+
+UI Specification from planning:
+- Type: ${orchestrationOutput.uiSpec.type}
+- Data: ${orchestrationOutput.uiSpec.dataDescription}
+${orchestrationOutput.uiSpec.highlights ? `- Highlights: ${orchestrationOutput.uiSpec.highlights.join(', ')}` : ''}
+${orchestrationOutput.uiSpec.chartType ? `- Chart: ${orchestrationOutput.uiSpec.chartType}` : ''}`;
+
+        const c1Context = (uiAction === 'ADD' || uiAction === 'MODIFY') ? options.currentUIContent : undefined;
+        
+        let newUIContent = '';
+        for await (const chunk of c1Service.generateUIStream({
+          prompt: enhancedPrompt,
+          data: fetchedData || {},
+          conversationHistory: conversationHistory as any,
+          currentUIContent: c1Context,
+          uiAction,
+          uiSpec: orchestrationOutput.uiSpec,
+        })) {
+          if (chunk.type === 'artifact' || chunk.type === 'content') {
+            newUIContent += chunk.content;
           }
-
-          // Generate summary message AFTER UI is created, passing the full UI to OpenAI
-          const summaryResponse = await this.client.chat.completions.create({
-            model: this.model,
-            messages: [
-              {
-                role: 'system',
-                content: `Sei un assistente AI che lavora come un collega. Hai appena creato una UI interattiva per l'utente.
-
-Analizza la UI generata e scrivi un messaggio conciso (2-3 frasi) che:
-1. Riassume i dati chiave o insight principali trovati
-2. Menziona cosa l'utente può fare con la UI
-3. Usa un tono amichevole e professionale
-
-IMPORTANTE:
-- NON copiare testi lunghi dalla UI o sezioni di analisi dettagliate
-- Estrai solo i punti salienti più rilevanti (numeri chiave, top performer, trend)
-- Sii breve ma informativo
-- Usa emoji quando appropriato 📊 📦 🛍️
-
-Esempi:
-- "Ho analizzato le vendite: Global Solutions Ltd è il tuo top cliente con €567k (58% del totale). Nella dashboard puoi vedere i trend e confrontare tutti i clienti 📊"
-- "Lo stock del Magazzino A è al 85% di capacità con 1.234 articoli. Puoi filtrare per categoria e vedere i dettagli 📦"
-- "Il catalogo ha 156 prodotti attivi in 12 categorie. Ho organizzato tutto con prezzi e disponibilità 🛍️"
-
-Usa un tono amichevole e professionale, come se stessi lavorando fianco a fianco con l'utente.`
-              },
-              {
-                role: 'user',
-                content: `L'utente ha chiesto: "${userPrompt}"\n\nUI generata (estratto primi 2000 caratteri):\n${fullUIContent.substring(0, 2000)}...\n\nScrivi un messaggio breve (2-3 frasi) che riassuma gli insight chiave trovati nella UI, senza copiare testi lunghi.`
-              }
-            ],
-            temperature: 0.7,
-            max_tokens: 150,
-          });
-
-          const summaryMessage = summaryResponse.choices[0].message.content || 'Dashboard creata! Guarda il workspace per i dettagli.';
-          yield { type: 'summary_message', content: summaryMessage };
-        } else {
-          // Text response
-          const followUpResponse = await this.client.chat.completions.create({
-            model: this.model,
-            messages: [
-              ...messages,
-              assistantMessage as any,
-              ...toolMessages as any,
-            ],
-          });
-
-          yield {
-            type: 'text',
-            content: followUpResponse.choices[0].message.content || '',
-          };
         }
+
+        // Merge UI based on action
+        let finalUIContent = '';
+        if (uiAction === 'NEW' || uiAction === 'REPLACE' || !options.currentUIContent) {
+          finalUIContent = newUIContent;
+        } else if (uiAction === 'ADD') {
+          finalUIContent = options.currentUIContent + '\n\n' + newUIContent;
+        } else if (uiAction === 'MODIFY') {
+          finalUIContent = this.mergeUIComponents(options.currentUIContent, newUIContent);
+        }
+
+        yield { type: 'ui_complete', content: finalUIContent };
+
+        // Generate summary message
+        const summaryResponse = await this.client.chat.completions.create({
+          model: this.model,
+          messages: [
+            {
+              role: 'system',
+              content: `Scrivi un messaggio breve (2-3 frasi) che riassuma gli insight chiave dalla UI generata. Usa un tono amichevole e professionale.`,
+            },
+            {
+              role: 'user',
+              content: `Query: "${userPrompt}"\nUI: ${finalUIContent.substring(0, 2000)}...\n\nRiassumi i dati chiave.`,
+            },
+          ],
+        });
+
+        yield { type: 'summary_message', content: summaryResponse.choices[0].message.content || 'UI creata!' };
+        
+      } else if (orchestrationOutput.responseFormat === 'form' && orchestrationOutput.formSpec) {
+        // Generate form with C1
+        yield { type: 'thinking', content: 'Generating form...' };
+
+        const schema = this.getSchemaForAction(orchestrationOutput.formSpec.actionType);
+        
+        // Clean prefillData: remove empty strings (they cause Select validation errors)
+        const cleanedPrefillData = orchestrationOutput.formSpec.prefillData 
+          ? Object.fromEntries(
+              Object.entries(orchestrationOutput.formSpec.prefillData)
+                .filter(([_, value]) => value !== '' && value !== null && value !== undefined)
+            )
+          : undefined;
+        
+        const formPrompt = `${userPrompt}
+
+Form Specification:
+- Action: ${orchestrationOutput.formSpec.actionType}
+- Title: ${orchestrationOutput.formSpec.title}
+- Description: ${orchestrationOutput.formSpec.description}
+${cleanedPrefillData ? `- Prefill: ${JSON.stringify(cleanedPrefillData)}` : ''}
+
+IMPORTANT: For Select/Dropdown fields, use undefined or null for empty values, NEVER use empty strings "".
+
+JSON Schema:
+${JSON.stringify(schema, null, 2)}`;
+
+        let formContent = '';
+        for await (const chunk of c1Service.generateUIStream({
+          prompt: formPrompt,
+          data: orchestrationOutput.formSpec,
+          conversationHistory: conversationHistory as any,
+          formSpec: orchestrationOutput.formSpec,
+        })) {
+          if (chunk.type === 'artifact' || chunk.type === 'content') {
+            formContent += chunk.content;
+          }
+        }
+
+        yield { type: 'ui_complete', content: formContent };
+        yield { type: 'summary_message', content: orchestrationOutput.textResponse };
+        
       } else {
         // Simple text response
-        yield { type: 'text', content: assistantMessage.content || '' };
+        yield { type: 'text', content: orchestrationOutput.textResponse };
       }
     } catch (error: any) {
       console.error('Stream orchestration error:', error);

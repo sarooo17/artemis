@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth.middleware';
+import { invalidateContextCache } from '../middleware/context.middleware';
 import { prisma } from '../config/database';
 import { SessionService } from '../services/session.service';
 import bcrypt from 'bcrypt';
@@ -38,6 +39,9 @@ router.put('/user', requireAuth, async (req: any, res: any) => {
       update: req.body,
       create: { userId, ...req.body },
     });
+
+    // Invalida la cache del contesto quando cambiano le impostazioni
+    await invalidateContextCache(userId);
 
     res.json(settings);
   } catch (error) {
@@ -95,6 +99,9 @@ router.put('/account', requireAuth, async (req: any, res: any) => {
         avatar: true,
       },
     });
+
+    // Invalida la cache del contesto quando cambia il nome
+    await invalidateContextCache(userId);
 
     res.json(user);
   } catch (error) {

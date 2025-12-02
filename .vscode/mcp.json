@@ -1,0 +1,9 @@
+{
+	"servers": {
+		"Thesys": {
+			"url": "https://thesys-kd1f.mcp.tadata.com/sse",
+			"type": "http"
+		}
+	},
+	"inputs": []
+}

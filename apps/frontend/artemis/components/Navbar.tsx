@@ -123,6 +123,16 @@ export default function Navbar() {
     return () => window.removeEventListener('popstate', handleRouteChange);
   }, []);
 
+  // Listen for workspace reload events (e.g., when title is updated)
+  useEffect(() => {
+    const handleReloadWorkspaces = () => {
+      console.log('🔄 Reloading workspaces...');
+      loadWorkspaces();
+    };
+    window.addEventListener('reloadWorkspaces', handleReloadWorkspaces as EventListener);
+    return () => window.removeEventListener('reloadWorkspaces', handleReloadWorkspaces as EventListener);
+  }, [user]);
+
   const loadWorkspaces = async () => {
     try {
       const response = await api.get('/chat/sessions');
@@ -604,11 +614,11 @@ export default function Navbar() {
 
         {/*Workspaces Container */}
         {isNavExpanded && (
-          <div className="w-full flex flex-col gap-2 mt-8 mb-2 h-full">
+          <div className="w-full flex flex-col gap-2 mt-8 mb-2 flex-1 min-h-0">
             <p className="text-xs font-extralight tracking-wider text-neutral-400 px-2">
               Workspaces
             </p>
-            <div className="h-full flex flex-col gap-0 w-full bg-neutral-50 rounded-2xl p-1 overflow-y-auto flex-1">
+            <div className="flex-1 min-h-0 flex flex-col gap-0 w-full bg-neutral-50 rounded-2xl p-1 overflow-y-auto scrollbar-hide">
               {workspaces.length === 0 ? (
                 <div className="flex items-center justify-center h-full text-neutral-400 text-sm">
                   No workspaces yet

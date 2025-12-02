@@ -8,6 +8,12 @@ interface C1RendererProps {
   type: 'ui' | 'text';
   streaming?: boolean;
   onComplete?: () => void;
+  onAction?: (event: {
+    type?: string;
+    params?: Record<string, any>;
+    humanFriendlyMessage: string;
+    llmFriendlyMessage: string;
+  }) => void;
 }
 
 /**
@@ -19,6 +25,7 @@ export default function C1Renderer({
   type,
   streaming = false,
   onComplete,
+  onAction,
 }: C1RendererProps) {
   const [chunks, setChunks] = useState<string[]>([]);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -40,14 +47,34 @@ export default function C1Renderer({
   }, [streaming, onComplete]);
 
   if (type === 'text') {
-    // Simple text rendering with markdown support
+    // Simple markdown-style rendering
+    const formatText = (text: string) => {
+      return text
+        // Bold: **text** or __text__
+        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+        .replace(/__(.+?)__/g, '<strong>$1</strong>')
+        // Italic: *text* or _text_
+        .replace(/\*(.+?)\*/g, '<em>$1</em>')
+        .replace(/_(.+?)_/g, '<em>$1</em>')
+        // Bullet points: - item or * item
+        .replace(/^[\-\*]\s+(.+)$/gm, '<li>$1</li>')
+        // Numbered lists: 1. item
+        .replace(/^\d+\.\s+(.+)$/gm, '<li>$1</li>')
+        // Line breaks
+        .replace(/\n/g, '<br />');
+    };
+    
+    const formatted = formatText(content);
+    // Wrap consecutive <li> in <ul>
+    const withLists = formatted.replace(/(<li>.*?<\/li>(?:<br \/>)?)+/g, (match) => {
+      return '<ul class="list-disc ml-6 my-2">' + match.replace(/<br \/>/g, '') + '</ul>';
+    });
+    
     return (
       <div className="prose prose-slate dark:prose-invert max-w-none">
         <div
-          className="whitespace-pre-wrap text-slate-700 dark:text-slate-300"
-          dangerouslySetInnerHTML={{
-            __html: content.replace(/\n/g, '<br />'),
-          }}
+          className="whitespace-pre-wrap text-slate-700 dark:text-slate-300 leading-relaxed"
+          dangerouslySetInnerHTML={{ __html: withLists }}
         />
       </div>
     );
@@ -64,10 +91,14 @@ export default function C1Renderer({
   }
 
   return (
-    <div ref={containerRef} className="c1-renderer w-full h-full" suppressHydrationWarning>
+    <div ref={containerRef} className="c1-renderer c1-wrapper w-full h-full" suppressHydrationWarning>
       {c1Response ? (
         <ThemeProvider>
-          <C1Component c1Response={c1Response} isStreaming={streaming} />
+          <C1Component 
+            c1Response={c1Response} 
+            isStreaming={streaming}
+            onAction={onAction}
+          />
         </ThemeProvider>
       ) : (
         <div className="flex items-center justify-center h-full text-slate-500">

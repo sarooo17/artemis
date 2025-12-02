@@ -11,19 +11,21 @@ datasource db {
 
 // Company model
 model Company {
-  id              String   @id @default(uuid())
-  name            String
-  vatNumber       String?  @unique @map("vat_number")
-  domain          String?  @unique // company email domain (e.g., "acme.com")
-  logo            String?  @db.Text
-  address         String?  @db.Text
-  sector          String?
-  language        String   @default("en")
-  currency        String   @default("EUR")
-  employeeCount   String?  @map("employee_count") // "1-10", "11-50", "51-200", "201-500", "500+"
-  billingPlanId   String?  @map("billing_plan_id")
-  createdAt       DateTime @default(now()) @map("created_at")
-  updatedAt       DateTime @updatedAt @map("updated_at")
+  id                       String   @id @default(uuid())
+  name                     String
+  vatNumber                String?  @unique @map("vat_number")
+  domain                   String?  @unique // company email domain (e.g., "acme.com")
+  logo                     String?  @db.Text
+  address                  String?  @db.Text
+  sector                   String?
+  language                 String   @default("en")
+  currency                 String   @default("EUR")
+  employeeCount            String?  @map("employee_count") // "1-10", "11-50", "51-200", "201-500", "500+"
+  billingPlanId            String?  @map("billing_plan_id")
+  fluentisCompanyCode      String?  @map("fluentis_company_code") // Fluentis Company Code
+  fluentisDepartmentCode   String?  @map("fluentis_department_code") // Fluentis Department Code
+  createdAt                DateTime @default(now()) @map("created_at")
+  updatedAt                DateTime @updatedAt @map("updated_at")
   
   // Relations
   users         User[]
@@ -97,6 +99,17 @@ model UserSettings {
   notifyOnTeamUpdates   Boolean  @default(true) @map("notify_on_team_updates")
   digestFrequency       String   @default("daily") @map("digest_frequency") // never, daily, weekly
   
+  // AI Preferences (Long-term Memory)
+  defaultChartType      String?  @default("bar") @map("default_chart_type") // bar, line, pie, area
+  defaultDateRange      String?  @default("month") @map("default_date_range") // week, month, quarter, year
+  defaultTablePageSize  Int?     @default(50) @map("default_table_page_size")
+  recentlyViewed        Json?    @map("recently_viewed") // [{type, id, name, timestamp}] - last 20 items
+  frequentQueries       Json?    @map("frequent_queries") // [{query, count, lastUsed}] - top 10
+  savedFilters          Json?    @map("saved_filters") // [{name, entity, filters}]
+  favoriteCustomers     Json?    @map("favorite_customers") // Array of customer IDs (string[])
+  favoriteItems         Json?    @map("favorite_items") // Array of item codes (string[])
+  preferredWarehouse    String?  @map("preferred_warehouse") // Default warehouse code
+  
   createdAt             DateTime @default(now()) @map("created_at")
   updatedAt             DateTime @updatedAt @map("updated_at")
   
@@ -146,6 +159,7 @@ model ChatSession {
   
   user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
   messages ChatMessage[]
+  uiSnapshots UISnapshot[]
   fluentisIntegrations FluentisIntegration[]
   dashboardWidgets DashboardWidget[]
   
@@ -165,9 +179,35 @@ model ChatMessage {
   createdAt     DateTime @default(now()) @map("created_at")
   
   session ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  uiSnapshots UISnapshot[]
   
   @@index([sessionId])
   @@map("chat_messages")
+}
+
+// UI Snapshots with Git-style branching support
+model UISnapshot {
+  id              String   @id @default(uuid())
+  sessionId       String   @map("session_id")
+  messageId       String   @map("message_id") // Link to ChatMessage that generated this UI
+  branchName      String   @default("main") @map("branch_name") // Git-style branch name
+  parentId        String?  @map("parent_id") // Previous snapshot in this branch
+  content         String   @db.LongText // HTML/C1 content (can be large)
+  layoutIntent    String   @map("layout_intent") // 'full' | 'extended' | 'preview' | 'hidden'
+  snapshotIndex   Int      @map("snapshot_index") // Position in branch (0, 1, 2...)
+  metadata        Json?    // { toolCalls, dataPreview, generationTime, tokenCount }
+  isActive        Boolean  @default(true) @map("is_active") // false if in abandoned branch
+  createdAt       DateTime @default(now()) @map("created_at")
+  
+  session       ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  message       ChatMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  parent        UISnapshot? @relation("SnapshotHistory", fields: [parentId], references: [id], onDelete: SetNull)
+  children      UISnapshot[] @relation("SnapshotHistory")
+  
+  @@index([sessionId, branchName, snapshotIndex])
+  @@index([sessionId, isActive])
+  @@index([messageId])
+  @@map("ui_snapshots")
 }
 
 // Fluentis Integration Workflow
@@ -355,6 +395,39 @@ model InviteLink {
   @@index([token])
   @@index([expiresAt])
   @@map("invite_links")
+}
+
+// Action Audit Log - Tracks all write operations to Fluentis
+model ActionLog {
+  id                String   @id @default(uuid())
+  userId            String   @map("user_id")
+  sessionId         String?  @map("session_id") // Link to chat session if triggered from chat
+  actionType        String   @map("action_type") // "create_sales_order", "update_customer", "create_item", etc.
+  entityType        String   @map("entity_type") // "sales_order", "customer", "item", "invoice", etc.
+  entityId          String?  @map("entity_id") // Fluentis entity ID (if available)
+  
+  // Request/Response tracking
+  requestPayload    Json     @map("request_payload") // Input data sent to Fluentis
+  responsePayload   Json?    @map("response_payload") // Response from Fluentis
+  
+  // Status tracking
+  status            String   @default("pending") // "pending", "success", "failed"
+  errorMessage      String?  @map("error_message") @db.Text
+  executionTimeMs   Int?     @map("execution_time_ms") // Time taken to execute
+  
+  // Context tracking
+  ipAddress         String?  @map("ip_address")
+  userAgent         String?  @map("user_agent") @db.Text
+  
+  createdAt         DateTime @default(now()) @map("created_at")
+  completedAt       DateTime? @map("completed_at")
+  
+  @@index([userId, createdAt])
+  @@index([sessionId])
+  @@index([status])
+  @@index([actionType])
+  @@index([entityType, entityId])
+  @@map("action_logs")
 }
 
 // Dashboard Categories (like browser tabs)

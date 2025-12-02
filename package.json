@@ -5,7 +5,9 @@
   "main": "index.js",
   "scripts": {
     "dev:frontend": "pnpm --filter @artemis/frontend dev",
-    "dev:backend": "pnpm --filter @artemis/backend dev"
+    "dev:backend": "pnpm --filter @artemis/backend dev",
+    "dev:mock": "pnpm --filter @artemis/mock-fluentis dev",
+    "dev:all": "concurrently \"pnpm dev:mock\" \"pnpm dev:backend\" \"pnpm dev:frontend\""
   },
   "keywords": [],
   "author": "Riccardo Saro",

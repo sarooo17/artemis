@@ -62,3 +62,21 @@ body {
 .scrollbar-hidden::-webkit-scrollbar-thumb {
   background: transparent;
 }
+
+/* Hide scrollbar completely */
+.scrollbar-hide {
+  -ms-overflow-style: none;  /* IE and Edge */
+  scrollbar-width: none;  /* Firefox */
+}
+
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;  /* Chrome, Safari and Opera */
+}
+
+/* Crayon Card specific styles - override C1 defaults */
+.crayon-card-card {
+  background-color: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+  box-shadow: none !important;
+}

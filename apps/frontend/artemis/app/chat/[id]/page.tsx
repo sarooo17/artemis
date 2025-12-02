@@ -7,6 +7,8 @@ import { api } from '@/lib/api';
 import Navbar from "@/components/Navbar";
 import { useAuth } from "@/contexts/AuthContext";
 import C1Renderer from "@/components/C1Renderer";
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import "@crayonai/react-ui/styles/index.css";
 
 type AIResponseBarState = "thinking" | "preview" | "expanded" | "full" | "button" | "hidden";
@@ -17,6 +19,32 @@ interface ChatMessage {
   aiResponse: string;
   responseType: 'text' | 'ui';
   timestamp: Date;
+}
+
+interface UISnapshot {
+  id: string;
+  sessionId: string;
+  messageId: string;
+  branchName: string;
+  parentId: string | null;
+  content: string;
+  layoutIntent: 'full' | 'extended' | 'preview' | 'hidden';
+  snapshotIndex: number;
+  metadata: Record<string, any> | null;
+  isActive: boolean;
+  createdAt: string;
+}
+
+interface BranchInfo {
+  name: string;
+  snapshotCount: number;
+  lastUpdate: string;
+  isActive: boolean;
+  forkPoints: Array<{
+    messageId: string;
+    fromBranch: string;
+    toBranch: string;
+  }>;
 }
 
 function ChatPageContent() {
@@ -40,6 +68,18 @@ function ChatPageContent() {
   const [isStreaming, setIsStreaming] = useState(false);
   const [uiSummaryMessage, setUiSummaryMessage] = useState("");
   const [streamedAiResponse, setStreamedAiResponse] = useState("");
+  const [streamedUIContent, setStreamedUIContent] = useState(""); // Separato per UI
+  
+  // UI History with Git-style branching
+  const [branches, setBranches] = useState<Map<string, UISnapshot[]>>(new Map([['main', []]]));
+  const [allBranchInfo, setAllBranchInfo] = useState<BranchInfo[]>([]);
+  const [currentBranch, setCurrentBranch] = useState<string>('main');
+  const [currentUIIndex, setCurrentUIIndex] = useState<number>(-1); // -1 means live mode (latest)
+  const [isExploringHistory, setIsExploringHistory] = useState<boolean>(false);
+  
+  // Layout Manager - Auto Apply layoutIntent
+  const [userManualOverride, setUserManualOverride] = useState<boolean>(false);
+  const [lastLayoutIntent, setLastLayoutIntent] = useState<'full' | 'extended' | 'preview' | 'hidden' | null>(null);
   
   const autoHideTimerRef = useRef<NodeJS.Timeout | null>(null);
   const barHoverRef = useRef(false);
@@ -125,42 +165,404 @@ function ChatPageContent() {
     }
   }, [params.id]);
 
+  const loadUIHistory = async () => {
+    try {
+      // Load all branches info
+      const branchesResponse = await api.get(`/chat/sessions/${params.id}/ui-snapshots/branches`);
+      
+      if (branchesResponse.ok) {
+        const branchesData = await branchesResponse.json();
+        setAllBranchInfo(branchesData.branches);
+        
+        // Load snapshots for each branch
+        const newBranches = new Map<string, UISnapshot[]>();
+        
+        for (const branchInfo of branchesData.branches) {
+          const snapshotsResponse = await api.get(
+            `/chat/sessions/${params.id}/ui-snapshots?branch=${branchInfo.name}`
+          );
+          
+          if (snapshotsResponse.ok) {
+            const snapshotsData = await snapshotsResponse.json();
+            newBranches.set(branchInfo.name, snapshotsData.snapshots);
+            
+            // Soft limit warning
+            if (snapshotsData.snapshots.length >= 50) {
+              console.warn(
+                `⚠️ Branch "${branchInfo.name}" has ${snapshotsData.snapshots.length} snapshots (soft limit: 50)`
+              );
+            }
+          }
+        }
+        
+        // Ensure 'main' branch exists even if empty
+        if (!newBranches.has('main')) {
+          newBranches.set('main', []);
+        }
+        
+        setBranches(newBranches);
+        
+        // Set to latest snapshot on main branch and render it
+        const mainSnapshots = newBranches.get('main') || [];
+        if (mainSnapshots.length > 0) {
+          setCurrentUIIndex(mainSnapshots.length - 1);
+          setIsExploringHistory(false);
+          
+          // Render the latest UI snapshot
+          const latestSnapshot = mainSnapshots[mainSnapshots.length - 1];
+          setStreamedUIContent(latestSnapshot.content);
+          setCurrentResponseType('ui');
+          
+          // Show summary message in preview bar if available
+          if (latestSnapshot.metadata?.summaryMessage) {
+            setCurrentAiResponse(latestSnapshot.metadata.summaryMessage);
+          }
+          // Note: aiBarState will be set by loadChatSession() after this returns
+          
+          return true; // Indica che c'è una UI
+        } else {
+          setCurrentUIIndex(-1);
+          return false; // Nessuna UI
+        }
+      } else {
+        return false;
+      }
+    } catch (error) {
+      console.error('Failed to load UI history:', error);
+      // Initialize with empty main branch on error
+      setBranches(new Map([['main', []]]));
+      setCurrentBranch('main');
+      setCurrentUIIndex(-1);
+      return false; // Nessuna UI caricata
+    }
+  };
+
   const loadChatSession = async () => {
     try {
       const response = await api.get(`/chat/sessions/${params.id}`);
 
       if (response.ok) {
         const data = await response.json();
+        console.log('[loadChatSession] Total messages from backend:', data.session.messages.length);
+        console.log('[loadChatSession] Messages:', data.session.messages);
         const messages: ChatMessage[] = [];
         
-        // Pair user and assistant messages
-        for (let i = 0; i < data.session.messages.length; i += 2) {
-          const userMsg = data.session.messages[i];
-          const aiMsg = data.session.messages[i + 1];
-          if (userMsg && aiMsg) {
-            messages.push({
-              id: userMsg.id,
-              userMessage: userMsg.content,
-              aiResponse: aiMsg.content,
-              responseType: (aiMsg.metadata as any)?.type || 'text',
-              timestamp: new Date(userMsg.createdAt),
-            });
+        // Pair user and assistant messages correctly
+        // Messages are already sorted by createdAt, so we pair them sequentially
+        for (let i = 0; i < data.session.messages.length; i++) {
+          const msg = data.session.messages[i];
+          
+          // Find user messages
+          if (msg.role === 'user') {
+            // Look for the next assistant message
+            const nextMsg = data.session.messages[i + 1];
+            
+            if (nextMsg && nextMsg.role === 'assistant') {
+              const messageType = (nextMsg.metadata as any)?.type || 'text';
+              console.log('[loadChatSession] Processing message pair, type:', messageType);
+              
+              // ONLY add text messages to chat history
+              // UI messages are handled separately via UI Snapshots
+              if (messageType === 'text') {
+                // Extract response from JSON if needed
+                let aiContent = nextMsg.content;
+                try {
+                  const trimmed = aiContent.trim();
+                  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+                    const parsed = JSON.parse(trimmed);
+                    if (parsed.response) {
+                      aiContent = parsed.response;
+                    }
+                  }
+                } catch {
+                  // Not JSON or parsing failed, use original content
+                }
+                
+                messages.push({
+                  id: msg.id,
+                  userMessage: msg.content,
+                  aiResponse: aiContent,
+                  responseType: messageType,
+                  timestamp: new Date(msg.createdAt),
+                });
+              }
+              // Skip the assistant message we just processed
+              i++;
+            } else {
+              // No assistant message found - this happens when UI was generated
+              // Add user message with placeholder AI response
+              console.log('[loadChatSession] User message without assistant (UI response)');
+              messages.push({
+                id: msg.id,
+                userMessage: msg.content,
+                aiResponse: '[UI Response - see workspace]',
+                responseType: 'ui',
+                timestamp: new Date(msg.createdAt),
+              });
+            }
           }
         }
         
+        console.log('[loadChatSession] Final messages array:', messages.length);
         setChatHistory(messages);
         
-        // Show last AI response in preview
-        if (messages.length > 0) {
+        // Load UI History with branching
+        const hasUI = await loadUIHistory();
+        
+        // If no UI was loaded, show chat in full mode
+        if (!hasUI && messages.length > 0) {
           const lastMsg = messages[messages.length - 1];
           setCurrentUserMessage(lastMsg.userMessage);
           setCurrentAiResponse(lastMsg.aiResponse);
           setCurrentResponseType(lastMsg.responseType);
-          setAiBarState("preview");
+          // Show in full mode so user can see full chat history
+          setAiBarState("full");
+        } else if (hasUI && messages.length > 0) {
+          // When UI is loaded, show it in workspace and chat history in expanded mode
+          const lastMsg = messages[messages.length - 1];
+          setCurrentUserMessage(lastMsg.userMessage);
+          // currentAiResponse is already set by loadUIHistory with summary message
+          setAiBarState("expanded");
+        } else if (hasUI) {
+          // UI loaded but no text messages
+          setAiBarState("expanded");
         }
       }
     } catch (error) {
       console.error('Failed to load chat session:', error);
+    }
+  };
+
+  // UI History Navigation Functions
+  const goBackInHistory = () => {
+    const currentBranchSnapshots = branches.get(currentBranch) || [];
+    
+    if (currentUIIndex === -1) {
+      // Go to last snapshot in current branch
+      if (currentBranchSnapshots.length > 0) {
+        setCurrentUIIndex(currentBranchSnapshots.length - 1);
+        setIsExploringHistory(true);
+        
+        const snapshot = currentBranchSnapshots[currentBranchSnapshots.length - 1];
+        setStreamedUIContent(snapshot.content);
+        setCurrentResponseType('ui');
+      }
+    } else if (currentUIIndex > 0) {
+      // Go to previous snapshot
+      const newIndex = currentUIIndex - 1;
+      setCurrentUIIndex(newIndex);
+      
+      const snapshot = currentBranchSnapshots[newIndex];
+      setStreamedUIContent(snapshot.content);
+      setCurrentResponseType('ui');
+    }
+  };
+
+  const goForwardInHistory = () => {
+    const currentBranchSnapshots = branches.get(currentBranch) || [];
+    
+    if (currentUIIndex >= 0 && currentUIIndex < currentBranchSnapshots.length - 1) {
+      // Go to next snapshot
+      const newIndex = currentUIIndex + 1;
+      setCurrentUIIndex(newIndex);
+      
+      const snapshot = currentBranchSnapshots[newIndex];
+      setStreamedUIContent(snapshot.content);
+      setCurrentResponseType('ui');
+    } else if (currentUIIndex === currentBranchSnapshots.length - 1) {
+      // Return to live mode
+      setCurrentUIIndex(-1);
+      setIsExploringHistory(false);
+      
+      // Restore live content - prioritize UI over text
+      if (currentBranchSnapshots.length > 0) {
+        // Show the latest UI snapshot
+        const latestSnapshot = currentBranchSnapshots[currentBranchSnapshots.length - 1];
+        setStreamedUIContent(latestSnapshot.content);
+        setCurrentResponseType('ui');
+      } else if (chatHistory.length > 0) {
+        // If no UI, show last text message
+        const lastMsg = chatHistory[chatHistory.length - 1];
+        setStreamedAiResponse(lastMsg.aiResponse);
+        setCurrentResponseType(lastMsg.responseType);
+      }
+    }
+  };
+
+  const canGoBack = () => {
+    const currentBranchSnapshots = branches.get(currentBranch) || [];
+    return currentUIIndex > 0 || (currentUIIndex === -1 && currentBranchSnapshots.length > 0);
+  };
+
+  const canGoForward = () => {
+    const currentBranchSnapshots = branches.get(currentBranch) || [];
+    return currentUIIndex >= 0 && currentUIIndex < currentBranchSnapshots.length;
+  };
+
+  // Layout Manager - Apply layoutIntent from backend
+  const applyLayoutIntent = (layoutIntent: 'full' | 'extended' | 'preview' | 'hidden') => {
+    if (!userManualOverride) {
+      setLastLayoutIntent(layoutIntent);
+      
+      // Map layoutIntent to AIResponseBarState
+      const stateMap: Record<string, AIResponseBarState> = {
+        'full': 'full',
+        'extended': 'expanded',
+        'preview': 'preview',
+        'hidden': 'hidden',
+      };
+      
+      const targetState = stateMap[layoutIntent] || 'preview';
+      setAiBarState(targetState);
+      
+      console.log(`🎛️ Auto-applied layoutIntent: ${layoutIntent} → ${targetState}`);
+    } else {
+      console.log(`🎛️ Skipped layoutIntent (user override active): ${layoutIntent}`);
+    }
+  };
+
+  // Branch Switcher - Check if message has fork points
+  const getMessageBranches = (messageId: string): string[] => {
+    const branchesForMessage: string[] = [];
+    
+    for (const branchInfo of allBranchInfo) {
+      const branchSnapshots = branches.get(branchInfo.name) || [];
+      const hasMessage = branchSnapshots.some(s => s.messageId === messageId);
+      if (hasMessage) {
+        branchesForMessage.push(branchInfo.name);
+      }
+    }
+    
+    return branchesForMessage;
+  };
+
+  const switchToBranch = (messageId: string, branchName: string) => {
+    const branchSnapshots = branches.get(branchName) || [];
+    const snapshotIndex = branchSnapshots.findIndex(s => s.messageId === messageId);
+    
+    if (snapshotIndex !== -1) {
+      setCurrentBranch(branchName);
+      setCurrentUIIndex(snapshotIndex);
+      setIsExploringHistory(true);
+      
+      const snapshot = branchSnapshots[snapshotIndex];
+      setStreamedUIContent(snapshot.content);
+      setCurrentResponseType('ui');
+      
+      console.log(`🌳 Switched to branch "${branchName}" at snapshot ${snapshotIndex + 1}/${branchSnapshots.length}`);
+    }
+  };
+
+  // ====== ACTION EXECUTION ======
+  
+  /**
+   * Execute a write action on Fluentis ERP
+   */
+  const executeAction = async (
+    actionType: string,
+    payload: Record<string, any>,
+    options?: {
+      confirmMessage?: string;
+      successMessage?: string;
+      errorMessage?: string;
+    }
+  ): Promise<{ success: boolean; result?: any; error?: string }> => {
+    try {
+      // Show confirmation dialog for write operations
+      if (options?.confirmMessage) {
+        const confirmed = window.confirm(options.confirmMessage);
+        if (!confirmed) {
+          return { success: false, error: 'Action cancelled by user' };
+        }
+      }
+
+      // Show loading state
+      console.log(`⚡ Executing action: ${actionType}`, payload);
+
+      // Call backend action API
+      const response = await api.post('/actions/execute', {
+        actionType,
+        payload,
+        sessionId: params.id,
+      });
+
+      const data = await response.json();
+
+      if (response.ok && data.success) {
+        // Success notification
+        const message = options?.successMessage || `Action ${actionType} completed successfully`;
+        console.log(`✅ ${message}`, data);
+        
+        // Simple alert for now (can be replaced with toast library)
+        if (options?.successMessage) {
+          alert(`✅ ${options.successMessage}`);
+        }
+
+        return { success: true, result: data.result };
+      } else {
+        // Error notification
+        const errorMsg = data.error || options?.errorMessage || `Action ${actionType} failed`;
+        console.error(`❌ ${errorMsg}`, data);
+        
+        alert(`❌ ${errorMsg}`);
+        
+        return { success: false, error: errorMsg };
+      }
+    } catch (error: any) {
+      console.error('Action execution error:', error);
+      const errorMsg = error.message || 'Network error executing action';
+      alert(`❌ ${errorMsg}`);
+      return { success: false, error: errorMsg };
+    }
+  };
+
+  /**
+   * Handle action triggered from Thesys C1 UI
+   */
+  const handleC1Action = async (event: {
+    type?: string;
+    params?: Record<string, any>;
+    humanFriendlyMessage: string;
+    llmFriendlyMessage: string;
+  }) => {
+    console.log('🔄 C1 Action triggered:', event);
+
+    // Extract action type and payload from event
+    const actionType = event.type || 'unknown';
+    const payload = event.params || {};
+
+    // Filter out non-action events (like continue_conversation, navigation, etc.)
+    const nonActionTypes = ['continue_conversation', 'navigate', 'refresh', 'close', 'unknown'];
+    if (nonActionTypes.includes(actionType)) {
+      console.log(`ℹ️ Skipping non-action event: ${actionType}`);
+      // Just send the LLM message for conversation-type actions
+      if (event.llmFriendlyMessage) {
+        await sendMessageWithText(event.llmFriendlyMessage);
+      }
+      return;
+    }
+
+    // Map C1 action types to backend action types
+    const actionTypeMap: Record<string, string> = {
+      'create_order': 'create_sales_order',
+      'create_customer': 'create_customer',
+      'update_customer': 'update_customer',
+      'create_item': 'create_item',
+      'update_stock': 'update_stock',
+    };
+
+    const backendActionType = actionTypeMap[actionType] || actionType;
+
+    // Execute action with confirmation
+    const result = await executeAction(backendActionType, payload, {
+      confirmMessage: event.humanFriendlyMessage || `Execute: ${actionType}?`,
+      successMessage: `Operation completed: ${actionType}`,
+      errorMessage: `Error executing: ${actionType}`,
+    });
+
+    // Send LLM-friendly message to chat if successful
+    if (result.success && event.llmFriendlyMessage) {
+      await sendMessageWithText(event.llmFriendlyMessage);
     }
   };
 
@@ -183,21 +585,77 @@ function ChatPageContent() {
     setIsProcessing(true);
     setIsStreaming(true);
     
+    // Git-Style Branch Creation: if exploring history, create fork
+    if (isExploringHistory) {
+      const currentBranchSnapshots = branches.get(currentBranch) || [];
+      
+      if (currentUIIndex < currentBranchSnapshots.length - 1) {
+        // User is in the middle of history, create a new branch
+        const newBranchName = `fork-${Date.now()}`;
+        
+        try {
+          // Mark old snapshots after current index as inactive
+          const snapshotsToDeactivate = currentBranchSnapshots
+            .slice(currentUIIndex + 1)
+            .map(s => s.id);
+          
+          if (snapshotsToDeactivate.length > 0) {
+            await api.patch(`/chat/sessions/${params.id}/ui-snapshots/bulk`, {
+              snapshotIds: snapshotsToDeactivate,
+              isActive: false,
+            });
+          }
+          
+          // Switch to new branch for the new snapshot
+          setCurrentBranch(newBranchName);
+          setBranches(prev => {
+            const newMap = new Map(prev);
+            newMap.set(newBranchName, []);
+            return newMap;
+          });
+          
+          console.log(`🌳 Created new branch: ${newBranchName} (fork from ${currentBranch} at index ${currentUIIndex})`);
+        } catch (error) {
+          console.error('Failed to create branch:', error);
+          // Continue anyway, will save to main branch
+        }
+      }
+      
+      // Exit history exploration mode
+      setIsExploringHistory(false);
+      setCurrentUIIndex(-1);
+    }
+    
     // Reset workspace for new request
-    setStreamedAiResponse("");
     setUiSummaryMessage("");
     uiSummaryMessageRef.current = "";
-    setCurrentResponseType('text');
+    // IMPORTANT: Capture current UI content BEFORE resetting states
+    const currentUIContent = streamedUIContent || undefined;
+    
+    setStreamedAiResponse(""); // Reset per nuova risposta testuale
+    setCurrentResponseType('text'); // Default a text, sarà cambiato se arriva UI
+    
+    // Reset layout manager for new AI message
+    setUserManualOverride(false);
     
     // Create AbortController for this request
     abortControllerRef.current = new AbortController();
     
     try {
-      // Use orchestration endpoint with the current session ID
-      const response = await api.post('/chat/orchestrate/stream', {
+      
+      // Build request body
+      const requestBody: any = {
         sessionId: params.id,
         message: userMessage,
-      }, {
+      };
+      
+      // Only include currentUIContent if it exists (to avoid sending null)
+      if (currentUIContent) {
+        requestBody.currentUIContent = currentUIContent;
+      }
+      
+      // Use orchestration endpoint with the current session ID
+      const response = await api.post('/chat/orchestrate/stream', requestBody, {
         signal: abortControllerRef.current.signal,
       });
 
@@ -213,6 +671,8 @@ function ChatPageContent() {
       const reader = response.body?.getReader();
       const decoder = new TextDecoder();
       let streamedResponse = '';
+      let streamedUIContent = ''; // Final merged UI from backend
+      let uiAction: 'NEW' | 'ADD' | 'MODIFY' | 'REPLACE' = 'NEW'; // Action from orchestrator
       let sessionId = params.id;
       let userMessageId = '';
       let responseType: 'text' | 'ui' = 'text';
@@ -263,20 +723,27 @@ function ChatPageContent() {
                 } else if (data.type === 'data') {
                   // Data fetched from Fluentis
                   setThinkingMessage('Perfetto! Ora creo la visualizzazione per te...');
+                } else if (data.type === 'ui_action') {
+                  // Orchestrator tells us the merge strategy
+                  uiAction = data.content.action;
+                  console.log(`[UI Merge] Action: ${uiAction}, Has existing: ${data.content.hasExisting}`);
                 } else if (data.type === 'summary_message') {
                   // Summary message generated by OpenAI for UI responses
                   uiSummaryMessageRef.current = data.content;
                   setUiSummaryMessage(data.content);
-                  // Keep in thinking state, don't show preview yet
+                  setCurrentAiResponse(data.content);
+                  // Show summary in preview mode immediately
+                  if (previousState !== 'full') {
+                    setAiBarState('preview');
+                  }
                   setThinkingMessage('Generating UI...');
-                } else if (data.type === 'ui_chunk') {
-                  // UI chunk from C1 - save full content but DON'T show in response bar
+                } else if (data.type === 'ui_complete') {
+                  // Backend has already performed merge, just display the result
                   responseType = 'ui';
                   setCurrentResponseType('ui');
-                  // Stay in thinking state while streaming UI
-                  setThinkingMessage('Generating UI...');
-                  streamedResponse += data.content;
-                  setStreamedAiResponse(streamedResponse);
+                  streamedUIContent = data.content;
+                  setStreamedUIContent(data.content);
+                  console.log(`[UI] Received merged UI (${uiAction} action):`, data.content.substring(0, 100) + '...');
                   
                   // Auto-scroll in full mode
                   if (aiBarState === 'full' && scrollContainerRef.current) {
@@ -285,16 +752,41 @@ function ChatPageContent() {
                 } else if (data.type === 'text') {
                   // Text response (no UI) - show in preview as it streams
                   responseType = 'text';
-                  if (previousState !== 'full' && aiBarState !== 'preview') {
+                  // If there's already a UI, go to expanded mode
+                  if ((branches.get(currentBranch)?.length ?? 0) > 0 && previousState !== 'full') {
+                    setAiBarState('expanded');
+                  } else if (previousState !== 'full' && aiBarState !== 'preview') {
                     setAiBarState('preview');
                   }
-                  streamedResponse = data.content;
-                  setStreamedAiResponse(streamedResponse);
+                  
+                  // Try to parse if content looks like JSON
+                  let processedContent = data.content;
+                  try {
+                    // Check if content starts with { and ends with }
+                    const trimmed = data.content.trim();
+                    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+                      const parsed = JSON.parse(trimmed);
+                      // If it has a 'response' field, extract it
+                      if (parsed.response) {
+                        processedContent = parsed.response;
+                      }
+                    }
+                  } catch {
+                    // Not JSON or parsing failed, use original content
+                  }
+                  
+                  streamedResponse = processedContent;
+                  setStreamedAiResponse(processedContent);
                   
                   // Auto-scroll in full mode
                   if (aiBarState === 'full' && scrollContainerRef.current) {
                     scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
                   }
+                } else if (data.type === 'title_update') {
+                  // Title has been generated for new session
+                  console.log(`🏷️  Title updated: ${data.title}`);
+                  // Force reload workspaces in navbar to show new title
+                  window.dispatchEvent(new CustomEvent('reloadWorkspaces'));
                 } else if (data.type === 'done') {
                   setIsStreaming(false);
                   // Save text responses in chat history (only if we have userMessageId)
@@ -308,29 +800,95 @@ function ChatPageContent() {
                     };
                     setChatHistory(prev => [...prev, newMessage]);
                   } else if (responseType === 'ui' && userMessageId) {
-                    // For UI responses, save the summary message
+                    // For UI responses, save the summary message to chat history
+                    // The full UI content is saved separately as UI Snapshot
                     const summaryText = uiSummaryMessageRef.current || 'UI generated! Check the workspace.';
+                    setCurrentAiResponse(summaryText);
+                    
+                    // Add summary message to chat history so it appears in expanded/full mode
                     const newMessage: ChatMessage = {
                       id: userMessageId,
                       userMessage: userMessage,
                       aiResponse: summaryText,
-                      responseType: 'text', // Save as text in history
+                      responseType: 'text', // Mark as text so it appears in chat
                       timestamp: new Date(),
                     };
                     setChatHistory(prev => [...prev, newMessage]);
-                    // Set the current response for preview
-                    setCurrentAiResponse(summaryText);
+                    
+                    // Save UI Snapshot to database
+                    try {
+                      // Skip saving if UI is empty (backend sends merged result)
+                      if (!streamedUIContent || streamedUIContent.trim().length === 0) {
+                        console.warn('[UI Snapshot] Skipping save - no UI content generated');
+                      } else {
+                        const currentBranchSnapshots = branches.get(currentBranch) || [];
+                        const parentId = currentBranchSnapshots.length > 0 
+                          ? currentBranchSnapshots[currentBranchSnapshots.length - 1].id 
+                          : null;
+                        
+                        const snapshotResponse = await api.post(
+                          `/chat/sessions/${sessionId}/ui-snapshots`,
+                          {
+                            messageId: userMessageId,
+                            content: streamedUIContent, // Save merged UI from backend
+                            branchName: currentBranch,
+                            parentId: parentId,
+                            metadata: {
+                              toolCalls: toolCalls,
+                              summaryMessage: summaryText,
+                              timestamp: new Date().toISOString(),
+                              uiAction: uiAction, // Save the action used
+                            },
+                          }
+                        );
+                        
+                        if (snapshotResponse.ok) {
+                          const snapshotData = await snapshotResponse.json();
+                          const newSnapshot: UISnapshot = snapshotData.snapshot;
+                          
+                          // Update branches state
+                          setBranches(prev => {
+                            const newMap = new Map(prev);
+                            const branchSnapshots = newMap.get(currentBranch) || [];
+                            newMap.set(currentBranch, [...branchSnapshots, newSnapshot]);
+                            return newMap;
+                          });
+                          
+                          // Set current index to latest (exit history mode)
+                          setCurrentUIIndex(-1);
+                          setIsExploringHistory(false);
+                          
+                          // Soft limit warning
+                          if (currentBranchSnapshots.length >= 49) {
+                            console.warn(
+                              `⚠️ Branch "${currentBranch}" now has ${currentBranchSnapshots.length + 1} snapshots (soft limit: 50)`
+                            );
+                          }
+                        } else {
+                          console.error('Failed to save UI snapshot:', await snapshotResponse.text());
+                        }
+                      }
+                    } catch (error) {
+                      console.error('Error saving UI snapshot:', error);
+                    }
                   }
                   
                   // If we don't have userMessageId yet, log warning
                   if (!userMessageId) {
                     console.warn('[done] userMessageId is missing, message not saved to history');
                   }
-                  // Se eravamo in full mode, rimaniamo in full
-                  if (previousState === 'full') {
+                  
+                  // Apply layoutIntent from backend (Layout Manager)
+                  if (data.layoutIntent && previousState !== 'full') {
+                    applyLayoutIntent(data.layoutIntent);
+                  } else if (previousState === 'full') {
+                    // Se eravamo in full mode, rimaniamo in full
                     setAiBarState('full');
+                  } else if (responseType === 'ui') {
+                    // After generating UI, go to expanded mode to show summary
+                    setAiBarState('expanded');
                   } else {
-                    // Marca interazione solo dopo risposta AI completa
+                    // Fallback to preview if no layoutIntent
                     userInteractedRef.current = false;
                     setAiBarState('preview');
                   }
@@ -447,15 +1005,54 @@ function ChatPageContent() {
     const newMessage = editingValue.trim();
     cancelEditingMessage();
 
+    // Git-Style Branch Creation: editing an old message creates a fork
+    // Find the index of the edited message in chat history
+    const messageIndex = chatHistory.findIndex(msg => msg.id === messageId);
+    
+    if (messageIndex !== -1 && messageIndex < chatHistory.length - 1) {
+      // Not the last message - create a branch
+      const newBranchName = `fork-${Date.now()}`;
+      
+      try {
+        // Get all snapshots after the edited message on current branch
+        const currentBranchSnapshots = branches.get(currentBranch) || [];
+        const snapshotsAfterMessage = currentBranchSnapshots.filter(snapshot => {
+          // Find snapshots that come after this message in the timeline
+          const snapshotMessageIndex = chatHistory.findIndex(msg => msg.id === snapshot.messageId);
+          return snapshotMessageIndex > messageIndex;
+        });
+        
+        if (snapshotsAfterMessage.length > 0) {
+          // Mark snapshots after this message as inactive
+          await api.patch(`/chat/sessions/${params.id}/ui-snapshots/bulk`, {
+            snapshotIds: snapshotsAfterMessage.map(s => s.id),
+            isActive: false,
+          });
+          
+          console.log(`🌳 Created branch "${newBranchName}" - marked ${snapshotsAfterMessage.length} snapshots inactive`);
+        }
+        
+        // Switch to new branch
+        setCurrentBranch(newBranchName);
+        setBranches(prev => {
+          const newMap = new Map(prev);
+          newMap.set(newBranchName, []);
+          return newMap;
+        });
+      } catch (error) {
+        console.error('Failed to create branch on message edit:', error);
+      }
+    }
+
     setIsProcessing(true);
     setAiBarState("thinking");
     setThinkingMessage("Forking chat...");
 
     const thinkingMessages = ["Forking chat...", "Processing edit...", "Getting AI response..."];
-    let messageIndex = 0;
+    let msgIndex = 0;
     thinkingIntervalRef.current = setInterval(() => {
-      messageIndex = (messageIndex + 1) % thinkingMessages.length;
-      setThinkingMessage(thinkingMessages[messageIndex]);
+      msgIndex = (msgIndex + 1) % thinkingMessages.length;
+      setThinkingMessage(thinkingMessages[msgIndex]);
     }, 2000);
 
     try {
@@ -585,11 +1182,13 @@ function ChatPageContent() {
       if (!userInteractedRef.current) {
         userInteractedRef.current = true;
       }
+      setUserManualOverride(true);
       setAiBarState("expanded");
       cancelAutoHideTimer();
     } else if (aiBarState === "button") {
       // Show preview on button click and mark interaction to start timer
       userInteractedRef.current = true;
+      setUserManualOverride(true);
       setAiBarState("preview");
     }
   };
@@ -600,6 +1199,7 @@ function ChatPageContent() {
     }
     // Chiusura manuale: marca interazione per far partire timer subito
     userInteractedRef.current = true;
+    setUserManualOverride(true);
     setAiBarState("preview");
   };
 
@@ -609,6 +1209,7 @@ function ChatPageContent() {
       savedScrollPositionRef.current = scrollContainerRef.current.scrollTop;
     }
     
+    setUserManualOverride(true);
     if (aiBarState === "full") {
       // Exit fullscreen: torna a expanded
       setAiBarState("expanded");
@@ -621,6 +1222,7 @@ function ChatPageContent() {
   const handleCloseFromFull = () => {
     // X button in full mode: chiudi e vai a preview
     userInteractedRef.current = true;
+    setUserManualOverride(true);
     setAiBarState("preview");
   };
 
@@ -669,18 +1271,69 @@ function ChatPageContent() {
         className="relative flex h-full w-full overflow-hidden"
         onClick={(aiBarState === "expanded" || aiBarState === "full") ? handleOverlayClick : undefined}
       >
+        {/* UI History Navigation - Back/Forward buttons */}
+        {/*(branches.get(currentBranch)?.length ?? 0) > 0 && (
+          <div className="absolute top-4 right-4 z-40 flex items-center gap-2 bg-white shadow-md rounded-full px-3 py-2 border border-neutral-200">
+            <button
+              onClick={goBackInHistory}
+              disabled={!canGoBack()}
+              className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-neutral-100 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+              title="Go back in UI history"
+            >
+              <svg className="w-4 h-4 text-neutral-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+              </svg>
+            </button>
+            
+            <span className="text-xs text-neutral-600 font-medium min-w-[60px] text-center">
+              {isExploringHistory 
+                ? `${currentUIIndex + 1}/${branches.get(currentBranch)?.length ?? 0}`
+                : 'Live'
+              }
+            </span>
+            
+            <button
+              onClick={goForwardInHistory}
+              disabled={!canGoForward()}
+              className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-neutral-100 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+              title="Go forward in UI history"
+            >
+              <svg className="w-4 h-4 text-neutral-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+              </svg>
+            </button>
+            
+            {/* Branch indicator */}
+            {/*currentBranch !== 'main' && (
+              <span className="text-xs text-orange-600 font-medium ml-2 px-2 py-1 bg-orange-50 rounded-full">
+                {currentBranch}
+              </span>
+            )}
+          </div>
+        )*/}
+
         {/* Generative UI Area - occupies entire workspace */}
         <div className="absolute inset-0 overflow-auto p-8">
-          {streamedAiResponse ? (
+          {/* Updating overlay */}
+          {isStreaming && currentResponseType === 'ui' && streamedUIContent && (
+            <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 bg-blue-500 text-white px-4 py-2 rounded-full shadow-lg flex items-center gap-2">
+              <svg className="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+              <span className="text-sm font-medium">Updating UI...</span>
+            </div>
+          )}
+          
+          {streamedUIContent && currentResponseType === 'ui' ? (
             <C1Renderer 
-              content={streamedAiResponse} 
+              content={streamedUIContent} 
               type={currentResponseType}
               streaming={isStreaming}
+              onAction={handleC1Action}
             />
           ) : (
-            <div className="flex items-center justify-center h-full text-neutral-400">
-              <p>Start a conversation to see data visualizations</p>
-            </div>
+            <div className="flex items-center justify-center h-full text-neutral-400"></div>
           )}
         </div>
 
@@ -712,8 +1365,8 @@ function ChatPageContent() {
                 (aiBarState === "preview" || aiBarState === "button") ? "cursor-pointer hover:shadow-lg" : ""
               }`}
             >
-              {/* Expand/Collapse buttons - only in expanded and full */}
-              {(aiBarState === "expanded" || aiBarState === "full") && (
+              {/* Expand/Collapse buttons - only in expanded and full, and only if UI has been generated */}
+              {(aiBarState === "expanded" || aiBarState === "full") && (branches.get(currentBranch)?.length ?? 0) > 0 && (
                 <>
                   <button
                     onClick={handleToggleFull}
@@ -766,7 +1419,8 @@ function ChatPageContent() {
                 ) : null}
                 {(aiBarState === "expanded" || aiBarState === "full") ? (
                   // Expanded/Full: Show full chat history
-                  <>{chatHistory.map((message, index) => (
+                  <>{chatHistory.length === 0 && <div className="text-center text-neutral-400 py-4">No messages yet</div>}
+                  {chatHistory.map((message, index) => (
                     <div 
                       key={`msg-${message.id}`} 
                       className="space-y-3"
@@ -840,8 +1494,10 @@ function ChatPageContent() {
                         className="flex justify-start group"
                         ref={index === chatHistory.length - 1 ? lastMessageRef : null}
                       >
-                        <div className="max-w-2xl">
-                          <p className="text-sm text-neutral-800 leading-relaxed">{message.aiResponse}</p>
+                        <div className="prose prose-sm max-w-2xl text-sm text-neutral-800 leading-relaxed">
+                          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                            {message.aiResponse}
+                          </ReactMarkdown>
                           <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-2 mt-1">
                             <span className="text-xs text-neutral-400">{formatTime(message.timestamp)}</span>
                             <button
@@ -854,6 +1510,52 @@ function ChatPageContent() {
                               </svg>
                             </button>
                           </div>
+                          
+                          {/* Inline Branch Switcher - Show if message has multiple branches */}
+                          {(() => {
+                            const messageBranches = getMessageBranches(message.id);
+                            if (messageBranches.length > 1) {
+                              const currentBranchIndex = messageBranches.indexOf(currentBranch);
+                              const displayIndex = currentBranchIndex >= 0 ? currentBranchIndex : 0;
+                              
+                              return (
+                                <div className="flex items-center gap-2 mt-2 opacity-60 group-hover:opacity-100 transition-opacity">
+                                  <button
+                                    onClick={() => {
+                                      const prevIndex = (displayIndex - 1 + messageBranches.length) % messageBranches.length;
+                                      switchToBranch(message.id, messageBranches[prevIndex]);
+                                    }}
+                                    className="w-5 h-5 flex items-center justify-center hover:bg-neutral-100 rounded transition-colors"
+                                    title="Previous branch"
+                                  >
+                                    <svg className="w-3 h-3 text-neutral-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                                    </svg>
+                                  </button>
+                                  
+                                  <span className="text-xs text-neutral-500 font-medium min-w-8 text-center">
+                                    {displayIndex + 1}/{messageBranches.length}
+                                  </span>
+                                  
+                                  <button
+                                    onClick={() => {
+                                      const nextIndex = (displayIndex + 1) % messageBranches.length;
+                                      switchToBranch(message.id, messageBranches[nextIndex]);
+                                    }}
+                                    className="w-5 h-5 flex items-center justify-center hover:bg-neutral-100 rounded transition-colors"
+                                    title="Next branch"
+                                  >
+                                    <svg className="w-3 h-3 text-neutral-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                                    </svg>
+                                  </button>
+                                  
+                                  <span className="text-xs text-orange-500 ml-1">🌳</span>
+                                </div>
+                              );
+                            }
+                            return null;
+                          })()}
                         </div>
                       </div>
                     </div>
@@ -881,10 +1583,10 @@ function ChatPageContent() {
                   </div>
                 ) : aiBarState === "preview" ? (
                   // Preview state - show last message from history if available
-                  <div className="relative max-h-[72px] overflow-hidden">
-                    <p className="text-sm text-neutral-800 leading-relaxed line-clamp-3">
+                  <div className="relative max-h-[72px] overflow-hidden prose prose-sm text-sm text-neutral-800 leading-relaxed line-clamp-3">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
                       {chatHistory.length > 0 ? chatHistory[chatHistory.length - 1].aiResponse : currentAiResponse}
-                    </p>
+                    </ReactMarkdown>
                   </div>
                 ) : null}
                 </div>

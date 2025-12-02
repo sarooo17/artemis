@@ -724,6 +724,7 @@ router.get('/search', requireAuth as any, async (req: Request, res: Response): P
 const orchestrateSchema = z.object({
   message: z.string().min(1, 'Message is required'),
   sessionId: z.string().optional(),
+  currentUIContent: z.string().optional(), // Current UI for incremental updates
 });
 
 /**
@@ -734,7 +735,7 @@ const orchestrateSchema = z.object({
 router.post('/orchestrate/stream', requireAuth as any, validateBody(orchestrateSchema), async (req: Request, res: Response) => {
   try {
     const userId = (req as any).user?.id;
-    const { message, sessionId } = req.body;
+    const { message, sessionId, currentUIContent } = req.body;
 
     let session;
     let conversationHistory: any[] = [];
@@ -791,12 +792,16 @@ router.post('/orchestrate/stream', requireAuth as any, validateBody(orchestrateS
 
     let fullContent = '';
     let responseType = 'text';
+    let layoutIntent: 'full' | 'extended' | 'preview' | 'hidden' = 'extended'; // Default
     const toolCalls: any[] = [];
+    let summaryMessage = ''; // Track summary message for UI responses
 
     // Stream orchestration
     for await (const chunk of orchestrationService.orchestrateStream(message, {
       conversationHistory,
       sessionId: session.id,
+      context: req.context, // Pass request context
+      currentUIContent, // Pass existing UI for incremental updates
     })) {
       res.write(`data: ${JSON.stringify(chunk)}\n\n`);
 
@@ -806,6 +811,11 @@ router.post('/orchestrate/stream', requireAuth as any, validateBody(orchestrateS
 
       if (chunk.type === 'ui_chunk') {
         responseType = 'ui';
+        layoutIntent = 'hidden'; // Default for UI responses
+      }
+
+      if (chunk.type === 'summary_message') {
+        summaryMessage = chunk.content; // Save summary message for UI responses
       }
 
       if (chunk.type === 'tool_call') {
@@ -813,26 +823,83 @@ router.post('/orchestrate/stream', requireAuth as any, validateBody(orchestrateS
       }
     }
 
+    // Determine final layoutIntent based on response type
+    // This could be enhanced to parse from AI response in future
+    if (responseType === 'ui') {
+      layoutIntent = 'hidden'; // UI should take center stage
+    } else if (toolCalls.length > 0) {
+      layoutIntent = 'extended'; // Data responses with tools
+    } else {
+      layoutIntent = 'full'; // Pure conversational responses
+    }
+
     // Save assistant response
-    await prisma.chatMessage.create({
-      data: {
-        sessionId: session.id,
-        role: 'assistant',
-        content: fullContent,
-        metadata: {
-          type: responseType,
-          toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+    if (responseType === 'text') {
+      // For text responses, save the full content
+      await prisma.chatMessage.create({
+        data: {
+          sessionId: session.id,
+          role: 'assistant',
+          content: fullContent,
+          metadata: {
+            type: responseType,
+            layoutIntent, // Save layoutIntent in metadata
+            toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+          },
         },
-      },
-    });
+      });
+    } else if (responseType === 'ui') {
+      // For UI responses, save the summary message (or a default message if not provided)
+      // The full UI content is saved via the separate /ui-snapshots endpoint
+      const contentToSave = summaryMessage || 'Ho generato un\'interfaccia interattiva per visualizzare i dati.';
+      await prisma.chatMessage.create({
+        data: {
+          sessionId: session.id,
+          role: 'assistant',
+          content: contentToSave,
+          metadata: {
+            type: 'text', // Save as text so it appears in chat history
+            layoutIntent,
+            toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+            uiResponse: true, // Flag to indicate this is a summary of a UI response
+          },
+        },
+      });
+      console.log('💬 UI response saved to chat history:', summaryMessage ? 'with summary' : 'with default message');
+    }
 
-    // Update session
-    await prisma.chatSession.update({
-      where: { id: session.id },
-      data: { updatedAt: new Date() },
-    });
+    // Generate title if it's a new session (no conversation history)
+    if (conversationHistory.length === 0) {
+      try {
+        const generatedTitle = await OpenAIService.generateTitle(message);
+        await prisma.chatSession.update({
+          where: { id: session.id },
+          data: { 
+            title: generatedTitle,
+            updatedAt: new Date() 
+          },
+        });
+        console.log(`🏷️  Session title updated: "${generatedTitle}"`);
+        
+        // Send title update event to frontend
+        res.write(`data: ${JSON.stringify({ type: 'title_update', title: generatedTitle })}\n\n`);
+      } catch (error) {
+        console.error('❌ Failed to generate title:', error);
+        // Update timestamp anyway
+        await prisma.chatSession.update({
+          where: { id: session.id },
+          data: { updatedAt: new Date() },
+        });
+      }
+    } else {
+      // Update session timestamp
+      await prisma.chatSession.update({
+        where: { id: session.id },
+        data: { updatedAt: new Date() },
+      });
+    }
 
-    res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
+    res.write(`data: ${JSON.stringify({ type: 'done', layoutIntent })}\n\n`);
     res.end();
   } catch (error: any) {
     console.error('Orchestrate stream error:', error);
@@ -933,6 +1000,274 @@ router.post('/orchestrate', requireAuth as any, validateBody(orchestrateSchema),
   } catch (error: any) {
     console.error('Orchestrate error:', error);
     res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
+/**
+ * GET /api/chat/context
+ * Debug endpoint: Visualizza il contesto corrente della richiesta
+ */
+router.get('/context', requireAuth as any, async (req: Request, res: Response) => {
+  try {
+    // Il context è già stato iniettato dal middleware contextBuilder
+    const context = req.context;
+
+    if (!context) {
+      return res.status(500).json({ error: 'Context not available' });
+    }
+
+    res.json({
+      message: 'Request context successfully built',
+      context,
+    });
+  } catch (error) {
+    console.error('Context debug error:', error);
+    res.status(500).json({ error: 'Failed to retrieve context' });
+  }
+});
+
+// ========================================
+// UI SNAPSHOTS - Git-Style Branching
+// ========================================
+
+const saveSnapshotSchema = z.object({
+  messageId: z.string().uuid(),
+  content: z.string().min(1),
+  branchName: z.string().default('main'),
+  parentId: z.string().uuid().nullable().optional(),
+  metadata: z.object({
+    toolCalls: z.array(z.any()).optional(),
+    summaryMessage: z.string().optional(),
+    dataPreview: z.any().optional(),
+    generationTime: z.number().optional(),
+    tokenCount: z.number().optional(),
+  }).optional(),
+});
+
+/**
+ * POST /api/chat/sessions/:id/ui-snapshots
+ * Save a new UI snapshot for a session
+ */
+router.post('/sessions/:id/ui-snapshots', requireAuth as any, validateBody(saveSnapshotSchema), async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user?.id;
+    const sessionId = req.params.id;
+    const { messageId, content, branchName, parentId, metadata } = req.body;
+
+    // Verify session belongs to user
+    const session = await prisma.chatSession.findFirst({
+      where: { id: sessionId, userId },
+    });
+
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    // Verify message exists in session
+    const message = await prisma.chatMessage.findFirst({
+      where: { id: messageId, sessionId },
+    });
+
+    if (!message) {
+      return res.status(404).json({ error: 'Message not found' });
+    }
+
+    // Get current snapshot count for this branch
+    const snapshotCount = await prisma.uISnapshot.count({
+      where: { sessionId, branchName },
+    });
+
+    // Soft limit warning (50 per branch)
+    if (snapshotCount >= 50) {
+      console.warn(`[UI Snapshots] Branch "${branchName}" in session ${sessionId} has ${snapshotCount} snapshots (soft limit: 50)`);
+    }
+
+    // Create snapshot
+    const snapshot = await prisma.uISnapshot.create({
+      data: {
+        sessionId,
+        messageId,
+        branchName,
+        parentId,
+        content,
+        layoutIntent: 'hidden', // layoutIntent è per AI response bar, non per workspace UI
+        snapshotIndex: snapshotCount,
+        metadata: metadata || {},
+        isActive: true,
+      },
+    });
+
+    res.status(201).json({ snapshot });
+  } catch (error) {
+    console.error('Save UI snapshot error:', error);
+    res.status(500).json({ error: 'Failed to save UI snapshot' });
+  }
+});
+
+/**
+ * GET /api/chat/sessions/:id/ui-snapshots
+ * Get UI snapshots for a session (optionally filtered by branch)
+ */
+router.get('/sessions/:id/ui-snapshots', requireAuth as any, async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user?.id;
+    const sessionId = req.params.id;
+    const branchName = (req.query.branch as string) || 'main';
+
+    // Verify session belongs to user
+    const session = await prisma.chatSession.findFirst({
+      where: { id: sessionId, userId },
+    });
+
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    // Get snapshots for this branch
+    const snapshots = await prisma.uISnapshot.findMany({
+      where: {
+        sessionId,
+        branchName,
+      },
+      orderBy: { snapshotIndex: 'asc' },
+      include: {
+        message: {
+          select: {
+            id: true,
+            role: true,
+            content: true,
+            createdAt: true,
+          },
+        },
+      },
+    });
+
+    res.json({ snapshots, branchName });
+  } catch (error) {
+    console.error('Get UI snapshots error:', error);
+    res.status(500).json({ error: 'Failed to get UI snapshots' });
+  }
+});
+
+/**
+ * GET /api/chat/sessions/:id/ui-snapshots/branches
+ * List all branches for a session with metadata
+ */
+router.get('/sessions/:id/ui-snapshots/branches', requireAuth as any, async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user?.id;
+    const sessionId = req.params.id;
+
+    // Verify session belongs to user
+    const session = await prisma.chatSession.findFirst({
+      where: { id: sessionId, userId },
+    });
+
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    // Get all unique branches with counts
+    const branches = await prisma.uISnapshot.groupBy({
+      by: ['branchName'],
+      where: { sessionId },
+      _count: { id: true },
+      _max: { createdAt: true },
+    });
+
+    // Get fork points (messages that have multiple child snapshots on different branches)
+    const forkPoints = await prisma.$queryRaw`
+      SELECT DISTINCT s1.message_id, s1.branch_name as from_branch, s2.branch_name as to_branch
+      FROM ui_snapshots s1
+      JOIN ui_snapshots s2 ON s1.message_id = s2.message_id 
+      WHERE s1.session_id = ${sessionId} 
+        AND s2.session_id = ${sessionId}
+        AND s1.branch_name != s2.branch_name
+    ` as any[];
+
+    const result = branches.map(b => ({
+      name: b.branchName,
+      snapshotCount: b._count.id,
+      lastUpdate: b._max.createdAt,
+      isActive: b.branchName === 'main', // main is always active
+    }));
+
+    res.json({ branches: result, forkPoints });
+  } catch (error) {
+    console.error('Get branches error:', error);
+    res.status(500).json({ error: 'Failed to get branches' });
+  }
+});
+
+/**
+ * PATCH /api/chat/sessions/:id/ui-snapshots/bulk
+ * Update multiple snapshots (used for marking old branch as inactive when forking)
+ */
+router.patch('/sessions/:id/ui-snapshots/bulk', requireAuth as any, async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user?.id;
+    const sessionId = req.params.id;
+    const { snapshotIds, isActive } = req.body;
+
+    if (!Array.isArray(snapshotIds) || typeof isActive !== 'boolean') {
+      return res.status(400).json({ error: 'snapshotIds (array) and isActive (boolean) are required' });
+    }
+
+    // Verify session belongs to user
+    const session = await prisma.chatSession.findFirst({
+      where: { id: sessionId, userId },
+    });
+
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    // Update snapshots
+    const result = await prisma.uISnapshot.updateMany({
+      where: {
+        id: { in: snapshotIds },
+        sessionId, // Security: ensure snapshots belong to this session
+      },
+      data: { isActive },
+    });
+
+    res.json({ updated: result.count });
+  } catch (error) {
+    console.error('Bulk update UI snapshots error:', error);
+    res.status(500).json({ error: 'Failed to update UI snapshots' });
+  }
+});
+
+/**
+ * DELETE /api/chat/sessions/:id/ui-snapshots/:snapshotId
+ * Delete a specific UI snapshot (used for cleanup)
+ */
+router.delete('/sessions/:id/ui-snapshots/:snapshotId', requireAuth as any, async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user?.id;
+    const { id: sessionId, snapshotId } = req.params;
+
+    // Verify session belongs to user
+    const session = await prisma.chatSession.findFirst({
+      where: { id: sessionId, userId },
+    });
+
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    // Delete snapshot
+    await prisma.uISnapshot.delete({
+      where: {
+        id: snapshotId,
+        sessionId, // Security: ensure snapshot belongs to this session
+      },
+    });
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Delete UI snapshot error:', error);
+    res.status(500).json({ error: 'Failed to delete UI snapshot' });
   }
 });
 

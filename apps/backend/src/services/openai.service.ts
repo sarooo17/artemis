@@ -1,124 +1,106 @@
 import OpenAI from 'openai';
 import { env } from '../config/env';
+import { orchestrationService } from './orchestration.service';
 
-const openai = new OpenAI({
-  apiKey: env.OPENAI_API_KEY,
-});
-
+/**
+ * OpenAI Service - Wrapper for backward compatibility
+ * Delegates to orchestrationService for actual AI operations
+ */
 export class OpenAIService {
   /**
-   * Send a message and get AI response with streaming
+   * Generate a response from OpenAI chat completion
+   */
+  static async chat(
+    messages: Array<{ role: string; content: string }>
+  ): Promise<string> {
+    const result = await orchestrationService.orchestrate(
+      messages[messages.length - 1].content,
+      {
+        conversationHistory: messages.slice(0, -1) as any,
+      }
+    );
+
+    return result.content;
+  }
+
+  /**
+   * Stream a response from OpenAI chat completion
    */
   static async chatStream(
-    messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
-    onChunk: (chunk: string, isThinking?: boolean) => void
-  ) {
-    try {
-      const stream = await openai.chat.completions.create({
-        model: 'gpt-3.5-turbo',
-        messages: [
-          {
-            role: 'system',
-            content: 'You are a helpful AI assistant. When you need time to think or process, you can send thinking messages by prefixing with [THINKING]: followed by what you\'re doing (e.g., [THINKING]: Analyzing the data...). Regular responses will be streamed normally.',
-          },
-          ...messages,
-        ],
-        temperature: 0.7,
-        max_tokens: 1000,
-        stream: true,
-      });
-
-      let fullResponse = '';
-      
-      for await (const chunk of stream) {
-        const content = chunk.choices[0]?.delta?.content || '';
-        if (content) {
-          fullResponse += content;
-          
-          // Check if it's a thinking message
-          if (fullResponse.includes('[THINKING]:')) {
-            const thinkingMatch = fullResponse.match(/\[THINKING\]:\s*([^\n]+)/);
-            if (thinkingMatch) {
-              onChunk(thinkingMatch[1], true);
-              fullResponse = fullResponse.replace(/\[THINKING\]:[^\n]+\n?/, '');
-            }
-          } else {
-            onChunk(content, false);
-          }
-        }
+    messages: Array<{ role: string; content: string }>,
+    onChunk: (chunk: string, isThinking: boolean) => void
+  ): Promise<void> {
+    const generator = orchestrationService.orchestrateStream(
+      messages[messages.length - 1].content,
+      {
+        conversationHistory: messages.slice(0, -1) as any,
       }
+    );
 
-      return fullResponse.replace(/\[THINKING\]:[^\n]+\n?/g, '').trim();
-    } catch (error: any) {
-      console.error('OpenAI chat error:', error);
-      
-      // Check for specific OpenAI errors
-      if (error.status === 429) {
-        throw new Error('RATE_LIMIT');
-      } else if (error.status === 401) {
-        throw new Error('INVALID_API_KEY');
-      } else if (error.status === 500) {
-        throw new Error('OPENAI_SERVER_ERROR');
+    for await (const event of generator) {
+      if (event.type === 'text') {
+        onChunk(event.content, false);
+      } else if (event.type === 'thinking') {
+        onChunk(event.content, true);
       }
-      
-      throw new Error('Failed to get AI response');
     }
   }
 
   /**
-   * Send a message and get AI response (non-streaming, for backwards compatibility)
-   */
-  static async chat(messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>) {
-    try {
-      const response = await openai.chat.completions.create({
-        model: 'gpt-3.5-turbo',
-        messages,
-        temperature: 0.7,
-        max_tokens: 1000,
-      });
-
-      return response.choices[0]?.message?.content || 'No response generated';
-    } catch (error: any) {
-      console.error('OpenAI chat error:', error);
-      
-      // Check for specific OpenAI errors
-      if (error.status === 429) {
-        throw new Error('RATE_LIMIT');
-      } else if (error.status === 401) {
-        throw new Error('INVALID_API_KEY');
-      } else if (error.status === 500) {
-        throw new Error('OPENAI_SERVER_ERROR');
-      }
-      
-      throw new Error('Failed to get AI response');
-    }
-  }
-
-  /**
-   * Generate a title for the chat session based on the first message
+   * Generate a title for a chat session based on the first message
    */
   static async generateTitle(firstMessage: string): Promise<string> {
     try {
-      const response = await openai.chat.completions.create({
-        model: 'gpt-3.5-turbo',
+      console.log(`🏷️  Generating title for message: "${firstMessage}"`);
+      
+      // Use OpenAI directly for simple title generation (not orchestration)
+      const client = new OpenAI({ apiKey: env.OPENAI_API_KEY });
+      
+      const response = await client.chat.completions.create({
+        model: 'gpt-4o-mini',
         messages: [
           {
             role: 'system',
-            content: 'Generate a short, concise title (max 5 words) for a chat conversation based on the user\'s first message. Reply with only the title, no quotes or punctuation.',
+            content: `Generate a professional, descriptive title (max 4-5 words) for this conversation.
+
+IMPORTANT:
+- Make it DESCRIPTIVE, not a copy of the user's message
+- Use professional business terminology
+- Be concise and clear
+- Only return the title, nothing else
+
+Examples:
+- User: "mostrami gli articoli" → Title: "Overview Articoli"
+- User: "dammi i clienti attivi" → Title: "Clienti Attivi"
+- User: "crea un nuovo ordine" → Title: "Nuovo Ordine"
+- User: "analizza le vendite di novembre" → Title: "Analisi Vendite Novembre"`,
           },
           {
             role: 'user',
-            content: firstMessage,
+            content: `User message: "${firstMessage}"\n\nTitle:`,
           },
         ],
-        temperature: 0.5,
+        temperature: 0.7,
         max_tokens: 20,
       });
 
-      const title = response.choices[0]?.message?.content?.trim() || 'New Chat';
-      return title.replace(/^["']|["']$/g, ''); // Remove quotes if any
+      // Clean up the response
+      let title = response.choices[0]?.message?.content?.trim() || '';
+      console.log(`🏷️  Raw title from OpenAI: "${title}"`);
+      
+      // Remove quotes if present
+      title = title.replace(/^["']|["']$/g, '');
+      // Remove "Title:" prefix if present
+      title = title.replace(/^Title:\s*/i, '');
+      // Truncate if too long
+      if (title.length > 50) {
+        title = title.substring(0, 47) + '...';
+      }
+
+      console.log(`🏷️  Final cleaned title: "${title}"`);
+      return title || 'New Chat';
     } catch (error) {
-      console.error('OpenAI title generation error:', error);
+      console.error('❌ Failed to generate title:', error);
       return 'New Chat';
     }
   }
