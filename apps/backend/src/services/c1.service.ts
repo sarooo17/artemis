@@ -64,7 +64,37 @@ export class C1Service {
         content: `You are a UI generation assistant that interprets WHAT to show and decides HOW to show it.
 When provided with data and a UI specification, generate appropriate React components.
 Focus on clarity, interactivity, and data-driven insights.
-Use charts, tables, cards, and other components as needed.`,
+Use charts, tables, cards, and other components as needed.
+
+## UI Generation Security Rules (CRITICAL)
+
+**ALLOWED COMPONENTS ONLY**:
+- Layout: Section, Card, Grid, Stack
+- Data Display: DataTable, LineChart, BarChart, PieChart, AreaChart, MetricCard
+- Forms: Input, Select, Checkbox, Button, DatePicker
+- Typography: Text, Heading, Badge, StatusBadge
+- Interactive: Tabs, Accordion, Modal
+
+**STRICTLY FORBIDDEN**:
+- <script> tags or inline JavaScript execution
+- Event handlers with arbitrary code (onclick="eval(...)", onerror, etc.)
+- External resource loading (fetch, XMLHttpRequest, import from URLs)
+- iframes, embed, object tags
+- Style injection or CSS with url() pointing to external resources
+- HTML comments containing executable code
+- data: URIs with executable content (data:text/html, data:application/javascript)
+
+**SECURITY REQUIREMENTS**:
+1. Generate ONLY declarative UI using allowed components
+2. Pass data via props, never embed raw JavaScript
+3. Use predefined event handlers (onSort, onFilter, onChange) - no custom code
+4. All URLs must be data properties, not executable
+5. Sanitize user-provided text before display (escape HTML entities)
+
+**OUTPUT FORMAT**:
+- Pure JSX with components and props
+- No executable code blocks
+- No inline scripts or event handlers with code`,
       },
       ...conversationHistory,
       {
@@ -91,7 +121,7 @@ Use charts, tables, cards, and other components as needed.`,
         throw new Error('No content generated from C1');
       }
 
-      return content;
+      return this.sanitizeUIOutput(content);
     } catch (error: any) {
       console.error('C1 UI generation error:', error.message);
       throw new Error(`Failed to generate UI: ${error.message}`);
@@ -714,6 +744,190 @@ Generate complete interactive forms with ALL necessary components.
       console.error('Text response error:', error.message);
       throw new Error(`Failed to generate text response: ${error.message}`);
     }
+  }
+
+  /**
+   * Generate UI with batch tool execution (NEW FLOW)
+   * C1 decides which tools to use and calls them all at once
+   */
+  async generateUIWithTools(
+    guidelines: any,
+    data: any,
+    tools: any[],
+    context?: any,
+    conversationHistory?: any[],
+    currentUIContent?: string
+  ): Promise<string> {
+    const messages: any[] = [
+      {
+        role: 'system',
+        content: `You are a UI generator. Use tools to enhance the UI with calculations, formatting, and icons.
+Tools available: calculate (sum, avg, totals), format (currency, dates), get_icon (contextual icons).
+Call ALL needed tools at once, then generate the final UI.
+
+## UI Generation Security Rules (CRITICAL)
+
+**ALLOWED COMPONENTS ONLY**:
+- Layout: Section, Card, Grid, Stack
+- Data Display: DataTable, LineChart, BarChart, PieChart, MetricCard
+- Forms: Input, Select, Button
+- Typography: Text, Heading, Badge, StatusBadge
+
+**STRICTLY FORBIDDEN**:
+- <script> tags or inline JavaScript
+- Event handlers with code (onclick, onerror)
+- External resources (fetch, import)
+- iframes, embed tags
+- data: URIs with executable content
+
+**SECURITY REQUIREMENTS**:
+1. Generate ONLY declarative JSX with components
+2. Use tools for calculations - never eval() or Function()
+3. All data via props, no embedded code
+4. DO NOT use "crayon-card-card" class on outermost wrapper
+
+Generate clean, professional, SAFE UI following the guidelines.`
+      },
+      {
+        role: 'user',
+        content: `Generate UI based on these guidelines:
+
+Guidelines: ${JSON.stringify(guidelines, null, 2)}
+
+Data: ${JSON.stringify(data, null, 2)}
+
+${currentUIContent ? `Current UI in workspace:
+${currentUIContent.substring(0, 2000)}${currentUIContent.length > 2000 ? '...[truncated]' : ''}
+
+` : ''}${conversationHistory && conversationHistory.length > 0 ? `Recent conversation:
+${conversationHistory.slice(-3).map((m: any) => `${m.role}: ${m.content?.substring(0, 200)}`).join('\n')}
+
+` : ''}Generate a professional UI following the guidelines. Use tools to calculate totals, format values, and get appropriate icons.`
+      }
+    ];
+
+    try {
+      console.log('[C1] Step 1: Calling C1 with tools...');
+      
+      // STEP 1: C1 decides which tools to use
+      const response = await this.client.chat.completions.create({
+        model: this.defaultModel,
+        messages: messages,
+        tools: tools,
+        tool_choice: 'auto' as any
+      });
+
+      const message = response.choices[0]?.message;
+
+      // STEP 2: If tool calls exist, execute ALL in parallel
+      if (message.tool_calls && message.tool_calls.length > 0) {
+        console.log(`[C1] Step 2: Executing ${message.tool_calls.length} tools in parallel...`);
+
+        // Import tool service
+        const { toolService } = await import('./tool.service');
+
+        // Execute all tools in parallel
+        const toolResults = await Promise.all(
+          message.tool_calls.map(async (toolCall: any) => {
+            try {
+              const result = await toolService.executeToolCall(
+                toolCall.function.name,
+                JSON.parse(toolCall.function.arguments)
+              );
+
+              return {
+                role: 'tool' as const,
+                tool_call_id: toolCall.id,
+                content: JSON.stringify(result)
+              };
+            } catch (error: any) {
+              console.error(`[C1] Tool ${toolCall.function.name} error:`, error.message);
+              return {
+                role: 'tool' as const,
+                tool_call_id: toolCall.id,
+                content: JSON.stringify({ error: error.message })
+              };
+            }
+          })
+        );
+
+        console.log('[C1] Step 3: Passing tool results back to C1...');
+
+        // STEP 3: Pass all results back to C1
+        messages.push(message);
+        messages.push(...toolResults);
+
+        // STEP 4: C1 generates final UI with all tool results
+        const finalResponse = await this.client.chat.completions.create({
+          model: this.defaultModel,
+          messages: messages
+        });
+
+        const finalContent = finalResponse.choices[0]?.message?.content || '';
+        console.log('[C1] Step 4: UI generated successfully with tools');
+        return this.sanitizeUIOutput(finalContent);
+      }
+
+      // No tools needed, return content directly
+      console.log('[C1] No tools needed, returning UI directly');
+      return this.sanitizeUIOutput(message.content || '');
+
+    } catch (error: any) {
+      console.error('[C1] generateUIWithTools error:', error.message);
+      throw new Error(`Failed to generate UI with tools: ${error.message}`);
+    }
+  }
+
+  /**
+   * Security: Sanitize UI output to remove dangerous patterns
+   * This is a defense-in-depth measure (C1 should not generate these, but we validate anyway)
+   */
+  private sanitizeUIOutput(ui: string): string {
+    if (!ui) return ui;
+
+    let sanitized = ui;
+    let removedPatterns: string[] = [];
+
+    // Remove <script> tags
+    const scriptRegex = /<script[\s\S]*?<\/script>/gi;
+    if (scriptRegex.test(sanitized)) {
+      sanitized = sanitized.replace(scriptRegex, '');
+      removedPatterns.push('<script> tags');
+    }
+
+    // Remove inline event handlers (onclick, onerror, onload, etc.)
+    const eventHandlerRegex = /\s+on\w+\s*=\s*["'][^"']*["']/gi;
+    if (eventHandlerRegex.test(sanitized)) {
+      sanitized = sanitized.replace(eventHandlerRegex, '');
+      removedPatterns.push('inline event handlers');
+    }
+
+    // Remove javascript: protocol
+    const jsProtocolRegex = /javascript\s*:/gi;
+    if (jsProtocolRegex.test(sanitized)) {
+      sanitized = sanitized.replace(jsProtocolRegex, 'removed:');
+      removedPatterns.push('javascript: protocol');
+    }
+
+    // Remove data: URIs with executable content
+    const dataUriRegex = /data:(text\/html|application\/javascript)[^"']*/gi;
+    if (dataUriRegex.test(sanitized)) {
+      sanitized = sanitized.replace(dataUriRegex, 'data:removed');
+      removedPatterns.push('executable data: URIs');
+    }
+
+    // Remove iframe, embed, object tags
+    const embedRegex = /<(iframe|embed|object)[\s\S]*?<\/\1>/gi;
+    if (embedRegex.test(sanitized)) {
+      sanitized = sanitized.replace(embedRegex, '');
+      removedPatterns.push('embed tags');
+    }
+
+    if (removedPatterns.length > 0) {
+      console.warn('[SECURITY] Sanitized UI output, removed:', removedPatterns.join(', '));
+    }
+
+    return sanitized;
   }
 
   // requiresUI() removed - OpenAI now decides responseFormat via structured output

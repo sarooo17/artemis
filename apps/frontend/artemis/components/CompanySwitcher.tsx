@@ -51,17 +51,19 @@ export default function CompanySwitcher({ isOpen, onClose, onSwitch, isNavExpand
     setLoading(true);
     setError("");
     try {
-      const response = await api.get('/user/available-contexts');
-
-      if (!response.ok) {
-        throw new Error('Failed to load contexts');
-      }
-
-      const data = await response.json();
-      setCurrentContext(data.currentContext);
-      setAvailableCompanies(data.availableCompanies);
-      setAvailableDepartments(data.availableDepartments);
-      setSelectedCompanyId(data.currentContext.companyId || "");
+      // Context switching disabled - context is fixed to user's profile
+      setLoading(false);
+      return;
+      
+      // const response = await api.get('/user/available-contexts');
+      // if (!response.ok) {
+      //   throw new Error('Failed to load contexts');
+      // }
+      // const data = await response.json();
+      // setCurrentContext(data.currentContext);
+      // setAvailableCompanies(data.availableCompanies);
+      // setAvailableDepartments(data.availableDepartments);
+      // setSelectedCompanyId(data.currentContext.companyId || "");
       
       // Check localStorage for saved context preference
       const savedContext = localStorage.getItem('userContext');

@@ -5,8 +5,10 @@
 
 /**
  * Response format decision from OpenAI
+ * 'text' = Text-only response in AI bar
+ * 'ui' = UI generation in workspace with summary in AI bar
  */
-export type ResponseFormat = 'text' | 'ui' | 'form';
+export type ResponseFormat = 'text' | 'ui';
 
 /**
  * Layout intent for AI response bar
@@ -31,7 +33,28 @@ export interface ApiCall {
 }
 
 /**
- * UI generation specification from OpenAI
+ * UI Guidelines from OpenAI for C1 generation
+ * High-level description of what UI to create
+ */
+export interface UiGuidelines {
+  /** Components to include in the UI */
+  components: Array<'table' | 'chart' | 'card' | 'list' | 'form'>;
+  
+  /** What to emphasize in the UI */
+  emphasis: string;
+  
+  /** How data should be mapped to UI elements */
+  dataMapping: Record<string, string>;
+  
+  /** Layout strategy */
+  layout: 'single' | 'split' | 'grid';
+  
+  /** Chart type if chart component included */
+  chartType: 'bar' | 'line' | 'pie' | 'area' | 'scatter';
+}
+
+/**
+ * UI generation specification from OpenAI (DEPRECATED - use UiGuidelines)
  * Describes WHAT to show, not HOW to show it
  */
 export interface UiSpec {
@@ -111,16 +134,19 @@ export interface OrchestrationOutput {
   /** Layout intent for response bar */
   layoutIntent: LayoutIntent;
   
-  /** Text response (always present) */
+  /** Text response (summary placeholder, refined later) */
   textResponse: string;
   
   /** API calls to execute (if any) */
   apiCalls?: ApiCall[];
   
-  /** UI specification (if responseFormat='ui') */
+  /** UI guidelines for C1 (if responseFormat='ui') */
+  uiGuidelines?: UiGuidelines;
+  
+  /** UI specification (DEPRECATED - use uiGuidelines) */
   uiSpec?: UiSpec;
   
-  /** Form specification (if responseFormat='form') */
+  /** Form specification (part of UI guidelines now) */
   formSpec?: FormSpec;
   
   /** Error information (if operation failed) */
@@ -142,8 +168,8 @@ export const ORCHESTRATION_OUTPUT_SCHEMA = {
     },
     responseFormat: {
       type: 'string',
-      enum: ['text', 'ui', 'form'],
-      description: 'Format of response: text=simple answer, ui=data visualization, form=write operation needs input',
+      enum: ['text', 'ui'],
+      description: 'Format of response: text=simple answer in AI bar, ui=visual interface in workspace with summary in AI bar',
     },
     layoutIntent: {
       type: 'string',
@@ -183,9 +209,45 @@ export const ORCHESTRATION_OUTPUT_SCHEMA = {
         additionalProperties: false,
       },
     },
+    uiGuidelines: {
+      type: 'object',
+      description: 'High-level UI guidelines for C1 (if responseFormat=ui)',
+      properties: {
+        components: {
+          type: 'array',
+          items: {
+            type: 'string',
+            enum: ['table', 'chart', 'card', 'list', 'form']
+          },
+          description: 'Components to include in UI'
+        },
+        emphasis: {
+          type: 'string',
+          description: 'What to emphasize in the UI'
+        },
+        dataMapping: {
+          type: 'object',
+          description: 'How data maps to UI elements',
+          properties: {},
+          additionalProperties: false
+        },
+        layout: {
+          type: 'string',
+          enum: ['single', 'split', 'grid'],
+          description: 'Layout strategy'
+        },
+        chartType: {
+          type: 'string',
+          enum: ['bar', 'line', 'pie', 'area', 'scatter'],
+          description: 'Chart type if chart included'
+        }
+      },
+      required: ['components', 'emphasis', 'dataMapping', 'layout', 'chartType'],
+      additionalProperties: false
+    },
     uiSpec: {
       type: 'object',
-      description: 'UI generation specification (if responseFormat=ui)',
+      description: 'UI generation specification (DEPRECATED - use uiGuidelines)',
       properties: {
         type: {
           type: 'string',
@@ -297,6 +359,6 @@ export const ORCHESTRATION_OUTPUT_SCHEMA = {
       description: 'Whether to suggest UI visualization',
     },
   },
-  required: ['thinking', 'responseFormat', 'layoutIntent', 'textResponse', 'apiCalls', 'uiSpec', 'formSpec', 'error', 'suggestUI'],
+  required: ['thinking', 'responseFormat', 'layoutIntent', 'textResponse', 'apiCalls', 'uiGuidelines', 'uiSpec', 'formSpec', 'error', 'suggestUI'],
   additionalProperties: false,
 } as const;
