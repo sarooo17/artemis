@@ -109,6 +109,35 @@ CRITICAL: When user asks to add charts/analysis:
 4. Generate UI with the complete analysis
 
 DO NOT ask the user to provide data that you can fetch yourself!
+
+### UI Merge Markers (For C1 UI Generator)
+When generating UI modifications, C1 should use these markers for precise merging:
+
+**REPLACE Marker** (for modifying specific sections):
+\`\`\`jsx
+<!-- REPLACE: section-id -->
+<Section id="section-id" title="Updated Title">
+  {/* New content replaces old section */}
+</Section>
+<!-- END_REPLACE -->
+\`\`\`
+
+**INSERT_AFTER Marker** (for adding content after a section):
+\`\`\`jsx
+<!-- INSERT_AFTER: existing-section-id -->
+<Section id="new-section-id" title="New Section">
+  {/* This will be inserted after existing-section-id */}
+</Section>
+<!-- END_INSERT -->
+\`\`\`
+
+**Section IDs** (for automatic detection):
+Always use id attributes on Section components:
+\`\`\`jsx
+<Section id="sales-chart" title="Sales Overview">
+  {/* If this ID exists, it will auto-replace when regenerated */}
+</Section>
+\`\`\`
 ` : '';
 
     const basePrompt = `You are Artemis, an intelligent Context-Aware Operating System that acts as the BRAIN for planning and orchestration.
@@ -562,28 +591,35 @@ ${uiModificationGuidelines}`;
   }
 
   /**
-   * Merge UI components based on REPLACE markers
+   * ✅ IMPROVED: Merge UI components with structured approach
+   * Supports: REPLACE markers, Section IDs, semantic insertion
    */
   private mergeUIComponents(baseUI: string, newUI: string): string {
-    // Check if newUI has REPLACE markers
-    const replaceRegex = /<!--\s*REPLACE:\s*(\w+)\s*-->([\s\S]*?)<!--\s*END_REPLACE\s*-->/g;
+    console.log('[UI Merge] Starting merge operation...');
+    
+    // Strategy 1: Check for explicit REPLACE markers (highest priority)
+    const replaceRegex = /<!--\s*REPLACE:\s*([\w-]+)\s*-->([\s\S]*?)<!--\s*END_REPLACE\s*-->/g;
     let match;
     let hasMarkers = false;
     let mergedUI = baseUI;
     
     while ((match = replaceRegex.exec(newUI)) !== null) {
       hasMarkers = true;
-      const componentName = match[1];
+      const componentId = match[1];
       const newComponent = match[2].trim();
       
-      console.log(`[UI Merge] Attempting to replace component: ${componentName}`);
+      console.log(`[UI Merge] Found REPLACE marker for: ${componentId}`);
       
-      // Try to find component in base UI by name/id
-      // This is a simple implementation - looks for component by class or data-component
+      // Try multiple patterns to locate component in base UI
       const componentPatterns = [
-        new RegExp(`<div[^>]*className="[^"]*${componentName}[^"]*"[^>]*>[\\s\\S]*?</div>`, 'i'),
-        new RegExp(`<div[^>]*data-component="${componentName}"[^>]*>[\\s\\S]*?</div>`, 'i'),
-        new RegExp(`<!--\\s*${componentName}\\s*-->[\\s\\S]*?<!--\\s*END\\s*${componentName}\\s*-->`, 'i'),
+        // 1. HTML comment markers (most reliable)
+        new RegExp(`<!--\\s*${componentId}\\s*-->[\\s\\S]*?<!--\\s*END\\s*${componentId}\\s*-->`, 'i'),
+        // 2. Section with id attribute
+        new RegExp(`<Section[^>]*\\sid="${componentId}"[^>]*>[\\s\\S]*?</Section>`, 'i'),
+        // 3. Div with data-component attribute
+        new RegExp(`<div[^>]*\\sdata-component="${componentId}"[^>]*>[\\s\\S]*?</div>`, 'i'),
+        // 4. Div with specific className containing the id
+        new RegExp(`<div[^>]*\\sclassName="[^"]*${componentId}[^"]*"[^>]*>[\\s\\S]*?</div>`, 'i'),
       ];
       
       let replaced = false;
@@ -591,24 +627,126 @@ ${uiModificationGuidelines}`;
         if (pattern.test(mergedUI)) {
           mergedUI = mergedUI.replace(pattern, newComponent);
           replaced = true;
-          console.log(`[UI Merge] Successfully replaced component: ${componentName}`);
+          console.log(`✅ [UI Merge] Successfully replaced: ${componentId}`);
           break;
         }
       }
       
       if (!replaced) {
-        console.log(`[UI Merge] Component ${componentName} not found in base UI, appending instead`);
+        console.log(`⚠️ [UI Merge] Component ${componentId} not found, appending to end`);
         mergedUI += '\n\n' + newComponent;
       }
     }
     
-    // If no markers found, append as fallback (same as ADD)
-    if (!hasMarkers) {
-      console.log('[UI Merge] No REPLACE markers found, appending new content');
-      mergedUI = baseUI + '\n\n' + newUI;
+    if (hasMarkers) {
+      return mergedUI;
     }
     
-    return mergedUI;
+    // Strategy 2: Check for INSERT_AFTER markers (semantic insertion)
+    const insertRegex = /<!--\s*INSERT_AFTER:\s*([\w-]+)\s*-->([\s\S]*?)<!--\s*END_INSERT\s*-->/g;
+    let hasInsertMarkers = false;
+    
+    while ((match = insertRegex.exec(newUI)) !== null) {
+      hasInsertMarkers = true;
+      const targetId = match[1];
+      const contentToInsert = match[2].trim();
+      
+      console.log(`[UI Merge] Found INSERT_AFTER marker for: ${targetId}`);
+      
+      // Find target component end position
+      const targetPatterns = [
+        new RegExp(`(<!--\\s*${targetId}\\s*-->[\\s\\S]*?<!--\\s*END\\s*${targetId}\\s*-->)`, 'i'),
+        new RegExp(`(<Section[^>]*\\sid="${targetId}"[^>]*>[\\s\\S]*?</Section>)`, 'i'),
+      ];
+      
+      let inserted = false;
+      for (const pattern of targetPatterns) {
+        const targetMatch = mergedUI.match(pattern);
+        if (targetMatch) {
+          const insertPosition = targetMatch.index! + targetMatch[0].length;
+          mergedUI = mergedUI.slice(0, insertPosition) + '\n\n' + contentToInsert + mergedUI.slice(insertPosition);
+          inserted = true;
+          console.log(`✅ [UI Merge] Inserted after: ${targetId}`);
+          break;
+        }
+      }
+      
+      if (!inserted) {
+        console.log(`⚠️ [UI Merge] Target ${targetId} not found, appending to end`);
+        mergedUI += '\n\n' + contentToInsert;
+      }
+    }
+    
+    if (hasInsertMarkers) {
+      return mergedUI;
+    }
+    
+    // Strategy 3: No markers - intelligent section detection and matching
+    console.log('[UI Merge] No merge markers found, using intelligent strategies');
+    
+    // 3a. Check if new UI starts with a Section component with id
+    const sectionMatch = newUI.match(/<Section[^>]*\sid="([\w-]+)"[^>]*>/i);
+    if (sectionMatch) {
+      const newSectionId = sectionMatch[1];
+      console.log(`[UI Merge] Detected new section with id: ${newSectionId}`);
+      
+      // Check if this section already exists in base UI
+      const existingSectionPattern = new RegExp(`<Section[^>]*\\sid="${newSectionId}"[^>]*>[\\s\\S]*?</Section>`, 'i');
+      if (existingSectionPattern.test(mergedUI)) {
+        console.log(`✅ [UI Merge] Section ${newSectionId} exists, replacing it`);
+        mergedUI = mergedUI.replace(existingSectionPattern, newUI);
+        return mergedUI;
+      } else {
+        console.log(`[UI Merge] Section ${newSectionId} is new, appending`);
+        return baseUI + '\n\n' + newUI;
+      }
+    }
+    
+    // 3b. Check for similar component types (e.g., same title/heading)
+    // Extract title from new UI
+    const newTitleMatch = newUI.match(/<Section[^>]*\stitle="([^"]+)"|<h[1-3][^>]*>([^<]+)</i);
+    if (newTitleMatch) {
+      const newTitle = (newTitleMatch[1] || newTitleMatch[2] || '').trim();
+      if (newTitle) {
+        console.log(`[UI Merge] Detected component with title: "${newTitle}"`);
+        
+        // Try to find similar section in base UI by title
+        const similarSectionPattern = new RegExp(
+          `<Section[^>]*\\stitle="${newTitle}"[^>]*>[\\s\\S]*?</Section>`,
+          'i'
+        );
+        if (similarSectionPattern.test(mergedUI)) {
+          console.log(`✅ [UI Merge] Found similar section by title, replacing it`);
+          mergedUI = mergedUI.replace(similarSectionPattern, newUI);
+          return mergedUI;
+        }
+      }
+    }
+    
+    // 3c. Check component types - if new UI has same component types as base
+    // (e.g., both have charts, tables), this might be an update
+    const hasChart = /<(Line|Bar|Pie|Area|Scatter)Chart/i.test(newUI);
+    const hasTable = /<Table|<DataTable/i.test(newUI);
+    const hasCards = /<Card[^>]*>|crayon-card-card/i.test(newUI);
+    
+    if (hasChart && /<(Line|Bar|Pie|Area|Scatter)Chart/i.test(mergedUI)) {
+      console.log('[UI Merge] Both UIs contain charts, might be an update');
+      // Check if new UI is significantly different (>30% char difference)
+      const sizeDiff = Math.abs(newUI.length - mergedUI.length) / mergedUI.length;
+      if (sizeDiff < 0.3) {
+        console.log('✅ [UI Merge] Similar sizes, likely update - replacing chart section');
+        // Find first chart and replace entire section containing it
+        const chartPattern = /<Section[^>]*>[\\s\\S]*?<(Line|Bar|Pie|Area|Scatter)Chart[\\s\\S]*?<\/Section>/i;
+        if (chartPattern.test(mergedUI)) {
+          mergedUI = mergedUI.replace(chartPattern, newUI);
+          return mergedUI;
+        }
+      }
+    }
+    
+    // Fallback: Simple append with separator
+    console.log('[UI Merge] No similar components found, appending new content to base UI');
+    return baseUI + '\n\n' + newUI;
   }
 
   /**
@@ -774,16 +912,23 @@ ${orchestrationOutput.uiSpec.chartType ? `- Chart: ${orchestrationOutput.uiSpec.
           }
         }
 
-        // Merge UI based on action
+        // ✅ IMPROVED: Merge UI with intelligent strategy
         let finalUIContent = '';
         if (uiAction === 'NEW' || uiAction === 'REPLACE' || !options.currentUIContent) {
+          console.log(`[UI Strategy] ${uiAction}: Using new UI content directly`);
           finalUIContent = newUIContent;
         } else if (uiAction === 'ADD') {
-          finalUIContent = options.currentUIContent + '\n\n' + newUIContent;
+          console.log('[UI Strategy] ADD: Appending new content to existing UI');
+          // Simple append - newUIContent may contain INSERT_AFTER markers for smart placement
+          finalUIContent = this.mergeUIComponents(options.currentUIContent, newUIContent);
         } else if (uiAction === 'MODIFY') {
+          console.log('[UI Strategy] MODIFY: Merging with component replacement');
+          // Smart merge - newUIContent should contain REPLACE markers for specific components
           finalUIContent = this.mergeUIComponents(options.currentUIContent, newUIContent);
         }
 
+        // Signal that this is a UI response (for layoutIntent determination)
+        yield { type: 'ui_chunk', content: finalUIContent };
         yield { type: 'ui_complete', content: finalUIContent };
 
         // Generate summary message
@@ -842,6 +987,8 @@ ${JSON.stringify(schema, null, 2)}`;
           }
         }
 
+        // Signal that this is a UI response (for layoutIntent determination)
+        yield { type: 'ui_chunk', content: formContent };
         yield { type: 'ui_complete', content: formContent };
         yield { type: 'summary_message', content: orchestrationOutput.textResponse };
         

@@ -89,11 +89,6 @@ export const sendMessageSchema = z.object({
   uiContext: uiContextSchema,
 });
 
-export const forkChatSchema = z.object({
-  messageId: z.string().uuid(),
-  newMessage: z.string().min(1).max(10000),
-});
-
 export const updateSessionSchema = z.object({
   title: z.string().min(1).max(200).optional(),
   isArchived: z.boolean().optional(),

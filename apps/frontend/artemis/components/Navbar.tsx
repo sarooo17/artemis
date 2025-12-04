@@ -28,7 +28,8 @@ export default function Navbar() {
   const [chatMenuPosition, setChatMenuPosition] = useState({ x: 0, y: 0 });
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<'general' | 'account' | 'personalization' | 'notifications' | 'company' | 'security'>('general');
-  const [isCompanySwitcherOpen, setIsCompanySwitcherOpen] = useState(false);
+  // COMPANY SWITCHER DISABLED - Backend removed, UI preserved for future use
+  // const [isCompanySwitcherOpen, setIsCompanySwitcherOpen] = useState(false);
   const [companyName, setCompanyName] = useState('Company');
   const [departmentName, setDepartmentName] = useState('Department');
   const [isArchiveModalOpen, setIsArchiveModalOpen] = useState(false);
@@ -68,29 +69,26 @@ export default function Navbar() {
         setDepartmentName(context.departmentName || 'All departments');
       }
 
-      // Fetch fresh data from API but don't override user's saved preference
-      const response = await api.get('/user/available-contexts');
-
-      if (response.ok) {
-        const data = await response.json();
-          
-        // Only update if no saved context exists
-        if (!savedContext) {
-          const companyName = data.currentContext.companyName || 'Company';
-          const departmentName = data.currentContext.departmentName || 'All departments';
-          
-          setCompanyName(companyName);
-          setDepartmentName(departmentName);
-          
-          // Save to localStorage
-          localStorage.setItem('userContext', JSON.stringify({
-            companyName,
-            departmentName,
-            companyId: data.currentContext.companyId,
-            departmentId: data.currentContext.departmentId,
-          }));
-        }
-      }
+      // Context is now fixed to user's profile - no need to fetch
+      // const response = await api.get('/user/available-contexts');
+      // if (response.ok) {
+      //   const data = await response.json();
+      //   if (!savedContext) {
+      //     const companyName = data.currentContext.companyName || 'Company';
+      //     const departmentName = data.currentContext.departmentName || 'All departments';
+      //     
+      //     setCompanyName(companyName);
+      //     setDepartmentName(departmentName);
+      //     
+      //     // Save to localStorage
+      //     localStorage.setItem('userContext', JSON.stringify({
+      //       companyName,
+      //       departmentName,
+      //       companyId: data.currentContext.companyId,
+      //       departmentId: data.currentContext.departmentId,
+      //     }));
+      //   }
+      // }
     } catch (error) {
       console.error('Failed to load context:', error);
     }
@@ -186,35 +184,38 @@ export default function Navbar() {
     setIsSettingsOpen(false);
   };
 
-  const handleOpenCompanySwitcher = () => {
-    setIsCompanySwitcherOpen(true);
-  };
+  // COMPANY SWITCHER DISABLED - Backend removed
+  // const handleOpenCompanySwitcher = () => {
+  //   setIsCompanySwitcherOpen(true);
+  // };
 
-  const handleCloseCompanySwitcher = () => {
-    setIsCompanySwitcherOpen(false);
-  };
+  // const handleCloseCompanySwitcher = () => {
+  //   setIsCompanySwitcherOpen(false);
+  // };
 
   const handleContextSwitch = async () => {
     // Reload user data and update UI
     try {
-      const response = await api.get('/user/available-contexts');
-
-      if (response.ok) {
-        const data = await response.json();
-        const companyName = data.currentContext.companyName || 'Company';
-        const departmentName = data.currentContext.departmentName || 'All departments';
-        
-        setCompanyName(companyName);
-        setDepartmentName(departmentName);
-        
-        // Save to localStorage for persistence
-        localStorage.setItem('userContext', JSON.stringify({
-          companyName,
-          departmentName,
-          companyId: data.currentContext.companyId,
-          departmentId: data.currentContext.departmentId,
-        }));
-      }
+      // Context is now fixed to user's profile
+      return; // No need to reload contexts
+      // const response = await api.get('/user/available-contexts');
+      // 
+      // if (response.ok) {
+      //   const data = await response.json();
+      //   const companyName = data.currentContext.companyName || 'Company';
+      //   const departmentName = data.currentContext.departmentName || 'All departments';
+      //   
+      //   setCompanyName(companyName);
+      //   setDepartmentName(departmentName);
+      //   
+      //   // Save to localStorage for persistence
+      //   localStorage.setItem('userContext', JSON.stringify({
+      //     companyName,
+      //     departmentName,
+      //     companyId: data.currentContext.companyId,
+      //     departmentId: data.currentContext.departmentId,
+      //   }));
+      // }
     } catch (error) {
       console.error('Failed to refresh context:', error);
     }
@@ -540,7 +541,8 @@ export default function Navbar() {
             
             {isNavExpanded && (
               <div className="h-full flex-1 flex justify-end gap-1">
-                <button
+                {/* COMPANY SWITCHER BUTTON DISABLED - Backend removed */}
+                {/* <button
                   onClick={handleOpenCompanySwitcher}
                   className="flex-1 flex items-center justify-between p-1 bg-neutral-50 h-full rounded-full cursor-pointer hover:bg-neutral-100 transition-colors"
                 >
@@ -556,7 +558,7 @@ export default function Navbar() {
                   <div className="flex items-center w-6 h-6 justify-center">
                     <img src="/icon-selection.svg" alt="choose company" className="w-6 h-6 object-contain rounded-full" />
                   </div>
-                </button>
+                </button> */}
                 <button 
                   onClick={() => setIsNavExpanded(false)}
                   className="w-10 h-10 flex items-center justify-center hover:bg-neutral-100 rounded-xl transition-colors cursor-pointer"
@@ -936,13 +938,13 @@ export default function Navbar() {
         </div>
       )}
 
-      {/* Company Switcher Modal */}
-      <CompanySwitcher
+      {/* Company Switcher Modal - DISABLED (Backend removed) */}
+      {/* <CompanySwitcher
         isOpen={isCompanySwitcherOpen}
         onClose={handleCloseCompanySwitcher}
         onSwitch={handleContextSwitch}
         isNavExpanded={isNavExpanded}
-      />
+      /> */}
 
       {/* Settings Modal */}
       {isSettingsOpen && (

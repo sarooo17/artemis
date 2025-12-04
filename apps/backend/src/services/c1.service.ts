@@ -126,11 +126,20 @@ Existing UI (first 2000 chars):
 ${currentUIContent.substring(0, 2000)}
 \`\`\`
 
-⚠️ INSTRUCTIONS:
+⚠️ CRITICAL INSTRUCTIONS:
 - Generate ONLY the NEW components requested
 - DO NOT repeat existing components
-- New components will be appended to existing UI
+- New components will be APPENDED to existing UI
+- Wrap your new content in <Section id="unique-id"> tags
+- Choose a descriptive, unique id (e.g., "revenue-chart", "customer-table")
 - Ensure new components are self-contained and styled consistently
+
+✅ CORRECT FORMAT:
+<Section id="new-component-name" title="Component Title">
+  {/* Your new content here */}
+</Section>
+
+❌ WRONG: Generating full UI again or missing Section id
 
 ═══════════════════════════════════════════════════════
 `;
@@ -144,16 +153,25 @@ Existing UI (first 2000 chars):
 ${currentUIContent.substring(0, 2000)}
 \`\`\`
 
-⚠️ INSTRUCTIONS:
+⚠️ CRITICAL INSTRUCTIONS:
 - Generate ONLY the components that need modification
-- Use clear markers: <!-- REPLACE: ComponentName -->
-- Modified components will replace their counterparts
+- Use REPLACE markers to target specific components
+- Modified components will REPLACE their counterparts in existing UI
 - Keep same component structure/props when possible
 
-Example format:
-<!-- REPLACE: StatsCard -->
-<div className="stats-card">...</div>
+✅ CORRECT FORMAT (Option 1 - Explicit markers):
+<!-- REPLACE: sales-chart -->
+<Section id="sales-chart" title="Updated Sales">
+  {/* Modified content */}
+</Section>
 <!-- END_REPLACE -->
+
+✅ CORRECT FORMAT (Option 2 - Section id matching):
+<Section id="sales-chart" title="Updated Title">
+  {/* Backend will auto-replace existing section with same id */}
+</Section>
+
+❌ WRONG: Generating full UI again or missing markers/ids
 
 ═══════════════════════════════════════════════════════
 `;

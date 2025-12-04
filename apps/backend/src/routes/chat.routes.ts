@@ -5,7 +5,7 @@ import { requireAuth, optionalAuth } from '../middleware/auth.middleware';
 import { validateBody } from '../middleware/validation.middleware';
 import { OpenAIService } from '../services/openai.service';
 import { orchestrationService } from '../services/orchestration.service';
-import { sendMessageSchema, forkChatSchema, updateSessionSchema } from '../validators/common.validators';
+import { sendMessageSchema, updateSessionSchema } from '../validators/common.validators';
 
 const router = Router();
 
@@ -80,6 +80,58 @@ router.get('/sessions/:id', requireAuth as any, async (req: Request, res: Respon
     res.json({ session });
   } catch (error) {
     console.error('Get session error:', error);
+    res.status(500).json({ error: 'Failed to get session' });
+  }
+});
+
+/**
+ * GET /api/chat/sessions/:id/full
+ * Get session with messages AND UI snapshots in single query (optimized)
+ */
+router.get('/sessions/:id/full', requireAuth as any, async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user?.id;
+    const sessionId = req.params.id;
+
+    // Parallel fetch: session+messages and UI snapshots
+    const [session, snapshots] = await Promise.all([
+      prisma.chatSession.findFirst({
+        where: {
+          id: sessionId,
+          userId,
+        },
+        include: {
+          messages: {
+            orderBy: { createdAt: 'asc' },
+          },
+        },
+      }),
+      prisma.uISnapshot.findMany({
+        where: {
+          sessionId,
+          branchName: 'main', // Always main branch (no branching navigation)
+        },
+        orderBy: { snapshotIndex: 'asc' },
+        include: {
+          message: {
+            select: {
+              id: true,
+              role: true,
+              content: true,
+              createdAt: true,
+            },
+          },
+        },
+      }),
+    ]);
+
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    res.json({ session, snapshots });
+  } catch (error) {
+    console.error('Get session full error:', error);
     res.status(500).json({ error: 'Failed to get session' });
   }
 });
@@ -170,8 +222,8 @@ router.post('/send/stream', requireAuth as any, validateBody(sendMessageSchema),
     res.write(`data: ${JSON.stringify({ type: 'session', sessionId: session.id, userMessageId: userMessage.id })}\n\n`);
 
     // Prepare conversation history
-    const conversationHistory = session.messages
-      ? session.messages.map(m => ({
+    const conversationHistory = ('messages' in session && Array.isArray(session.messages))
+      ? session.messages.map((m: any) => ({
           role: m.role as 'user' | 'assistant',
           content: m.content,
         }))
@@ -298,8 +350,8 @@ router.post('/send', requireAuth as any, async (req: Request, res: Response) => 
     });
 
     // Prepare conversation history for OpenAI
-    const conversationHistory = session.messages
-      ? session.messages.map(m => ({
+    const conversationHistory = ('messages' in session && Array.isArray(session.messages))
+      ? session.messages.map((m: any) => ({
           role: m.role as 'user' | 'assistant',
           content: m.content,
         }))
@@ -379,146 +431,6 @@ router.post('/send', requireAuth as any, async (req: Request, res: Response) => 
   } catch (error) {
     console.error('Send message error:', error);
     res.status(500).json({ error: 'Failed to send message' });
-  }
-});
-
-/**
- * POST /api/chat/sessions/:id/fork
- * Fork a chat session from a specific message (replaces messages from that point)
- */
-router.post('/sessions/:id/fork', requireAuth as any, async (req: Request, res: Response) => {
-  try {
-    const userId = (req as any).user?.id;
-    const { id } = req.params;
-    const { messageId, newMessage } = req.body;
-
-    if (!messageId || !newMessage || typeof newMessage !== 'string') {
-      return res.status(400).json({ error: 'messageId and newMessage are required' });
-    }
-
-    // Get session with messages
-    const session = await prisma.chatSession.findFirst({
-      where: { id, userId },
-      include: {
-        messages: {
-          orderBy: { createdAt: 'asc' },
-        },
-      },
-    });
-
-    if (!session) {
-      return res.status(404).json({ error: 'Session not found' });
-    }
-
-    // Find the index of the message to fork from
-    const messageIndex = session.messages.findIndex(m => m.id === messageId);
-    if (messageIndex === -1) {
-      return res.status(404).json({ error: 'Message not found' });
-    }
-
-    // Get messages up to (but not including) the edited message
-    const messagesToKeep = session.messages.slice(0, messageIndex);
-    const messagesToDelete = session.messages.slice(messageIndex);
-
-    // Delete all messages from the fork point onwards
-    if (messagesToDelete.length > 0) {
-      await prisma.chatMessage.deleteMany({
-        where: {
-          id: {
-            in: messagesToDelete.map(m => m.id),
-          },
-        },
-      });
-    }
-
-    // Add the new edited user message
-    const userMessage = await prisma.chatMessage.create({
-      data: {
-        sessionId: session.id,
-        role: 'user',
-        content: newMessage,
-      },
-    });
-
-    // Prepare conversation history for OpenAI
-    const conversationHistory = messagesToKeep.map(m => ({
-      role: m.role as 'user' | 'assistant',
-      content: m.content,
-    }));
-    conversationHistory.push({ role: 'user', content: newMessage });
-
-    // Get AI response
-    let aiResponse: string;
-    try {
-      aiResponse = await OpenAIService.chat(conversationHistory);
-    } catch (error: any) {
-      console.error('OpenAI error:', error);
-      
-      if (error.message === 'RATE_LIMIT') {
-        return res.status(429).json({ 
-          error: 'Rate limit exceeded. Please wait a moment and try again.',
-          code: 'RATE_LIMIT'
-        });
-      } else if (error.message === 'INVALID_API_KEY') {
-        return res.status(500).json({ 
-          error: 'OpenAI API key is invalid. Please contact support.',
-          code: 'INVALID_API_KEY'
-        });
-      } else if (error.message === 'OPENAI_SERVER_ERROR') {
-        return res.status(503).json({ 
-          error: 'OpenAI service is temporarily unavailable. Please try again later.',
-          code: 'OPENAI_SERVER_ERROR'
-        });
-      }
-      
-      return res.status(500).json({ 
-        error: 'Failed to get AI response. Please try again.',
-        code: 'UNKNOWN_ERROR'
-      });
-    }
-
-    // Save AI message
-    const aiMessage = await prisma.chatMessage.create({
-      data: {
-        sessionId: session.id,
-        role: 'assistant',
-        content: aiResponse,
-      },
-    });
-
-    // If we're editing the first message, auto-rename the chat
-    let updatedTitle = session.title;
-    if (messageIndex === 0) {
-      try {
-        const generatedTitle = await OpenAIService.generateTitle(newMessage);
-        await prisma.chatSession.update({
-          where: { id: session.id },
-          data: { title: generatedTitle },
-        });
-        updatedTitle = generatedTitle;
-      } catch (error) {
-        console.error('Failed to generate title:', error);
-        // Continue without renaming if title generation fails
-      }
-    }
-
-    // Update session timestamp
-    await prisma.chatSession.update({
-      where: { id: session.id },
-      data: { updatedAt: new Date() },
-    });
-
-    res.json({
-      session: {
-        id: session.id,
-        title: updatedTitle,
-      },
-      userMessage,
-      assistantMessage: aiMessage,
-    });
-  } catch (error) {
-    console.error('Fork session error:', error);
-    res.status(500).json({ error: 'Failed to fork session' });
   }
 });
 
@@ -698,7 +610,6 @@ router.get('/search', requireAuth as any, async (req: Request, res: Response): P
         userId: req.user!.id,
         title: {
           contains: query,
-          mode: 'insensitive',
         },
       },
       select: {
@@ -790,6 +701,36 @@ router.post('/orchestrate/stream', requireAuth as any, validateBody(orchestrateS
     // Send session ID and userMessageId first
     res.write(`data: ${JSON.stringify({ type: 'session', sessionId: session.id, userMessageId: userMessage.id })}\n\n`);
 
+    // ✅ OPTIMIZED: Start title generation in parallel for new sessions
+    let titlePromise: Promise<string | null> | null = null;
+    let titleGenerated = false;
+    if (conversationHistory.length === 0) {
+      titlePromise = OpenAIService.generateTitle(message).catch((error) => {
+        console.error('❌ Failed to generate title:', error);
+        return null;
+      });
+      
+      // Send title update event as soon as it's ready (in parallel with stream)
+      titlePromise.then(async (generatedTitle) => {
+        if (generatedTitle && !titleGenerated) {
+          titleGenerated = true;
+          await prisma.chatSession.update({
+            where: { id: session.id },
+            data: { 
+              title: generatedTitle,
+              updatedAt: new Date() 
+            },
+          });
+          console.log(`🏷️  Session title updated (parallel): "${generatedTitle}"`);
+          
+          // Send title update event to frontend immediately
+          res.write(`data: ${JSON.stringify({ type: 'title_update', title: generatedTitle })}\n\n`);
+        }
+      }).catch(err => {
+        console.error('❌ Failed to update title:', err);
+      });
+    }
+
     let fullContent = '';
     let responseType = 'text';
     let layoutIntent: 'full' | 'extended' | 'preview' | 'hidden' = 'extended'; // Default
@@ -805,17 +746,21 @@ router.post('/orchestrate/stream', requireAuth as any, validateBody(orchestrateS
     })) {
       res.write(`data: ${JSON.stringify(chunk)}\n\n`);
 
-      if (chunk.type === 'ui_chunk' || chunk.type === 'text') {
+      // Only accumulate text chunks for text responses
+      // UI content is saved separately via /ui-snapshots endpoint
+      if (chunk.type === 'text') {
         fullContent += typeof chunk.content === 'string' ? chunk.content : JSON.stringify(chunk.content);
       }
 
       if (chunk.type === 'ui_chunk') {
         responseType = 'ui';
         layoutIntent = 'hidden'; // Default for UI responses
+        console.log('🎛️ [Stream] Detected ui_chunk, set responseType to ui');
       }
 
       if (chunk.type === 'summary_message') {
         summaryMessage = chunk.content; // Save summary message for UI responses
+        console.log('🎛️ [Stream] Received summary_message');
       }
 
       if (chunk.type === 'tool_call') {
@@ -824,13 +769,19 @@ router.post('/orchestrate/stream', requireAuth as any, validateBody(orchestrateS
     }
 
     // Determine final layoutIntent based on response type
-    // This could be enhanced to parse from AI response in future
+    const isFirstMessage = conversationHistory.length === 0;
+    
+    console.log(`🎛️ [Layout Decision] responseType: ${responseType}, isFirstMessage: ${isFirstMessage}`);
+    
     if (responseType === 'ui') {
-      layoutIntent = 'hidden'; // UI should take center stage
-    } else if (toolCalls.length > 0) {
-      layoutIntent = 'extended'; // Data responses with tools
+      layoutIntent = 'preview'; // UI responses always show preview with summary
+      console.log(`🎛️ [Layout] UI response → preview mode (isFirstMessage: ${isFirstMessage})`);
+    } else if (isFirstMessage) {
+      layoutIntent = 'full'; // First text message full to welcome user
+      console.log('🎛️ [Layout] First text message → full mode');
     } else {
-      layoutIntent = 'full'; // Pure conversational responses
+      layoutIntent = 'preview'; // Subsequent text responses in preview mode
+      console.log('🎛️ [Layout] Subsequent text → preview mode');
     }
 
     // Save assistant response
@@ -868,31 +819,14 @@ router.post('/orchestrate/stream', requireAuth as any, validateBody(orchestrateS
       console.log('💬 UI response saved to chat history:', summaryMessage ? 'with summary' : 'with default message');
     }
 
-    // Generate title if it's a new session (no conversation history)
-    if (conversationHistory.length === 0) {
-      try {
-        const generatedTitle = await OpenAIService.generateTitle(message);
-        await prisma.chatSession.update({
-          where: { id: session.id },
-          data: { 
-            title: generatedTitle,
-            updatedAt: new Date() 
-          },
-        });
-        console.log(`🏷️  Session title updated: "${generatedTitle}"`);
-        
-        // Send title update event to frontend
-        res.write(`data: ${JSON.stringify({ type: 'title_update', title: generatedTitle })}\n\n`);
-      } catch (error) {
-        console.error('❌ Failed to generate title:', error);
-        // Update timestamp anyway
-        await prisma.chatSession.update({
-          where: { id: session.id },
-          data: { updatedAt: new Date() },
-        });
-      }
-    } else {
-      // Update session timestamp
+    // ✅ OPTIMIZED: Wait for title generation to complete (if not already done)
+    if (titlePromise) {
+      await titlePromise; // Ensure it completes, but title_update already sent via .then()
+      console.log('🏷️  Title generation completed');
+    }
+    
+    // Always update session timestamp
+    if (!titleGenerated) {
       await prisma.chatSession.update({
         where: { id: session.id },
         data: { updatedAt: new Date() },
@@ -1146,128 +1080,6 @@ router.get('/sessions/:id/ui-snapshots', requireAuth as any, async (req: Request
   } catch (error) {
     console.error('Get UI snapshots error:', error);
     res.status(500).json({ error: 'Failed to get UI snapshots' });
-  }
-});
-
-/**
- * GET /api/chat/sessions/:id/ui-snapshots/branches
- * List all branches for a session with metadata
- */
-router.get('/sessions/:id/ui-snapshots/branches', requireAuth as any, async (req: Request, res: Response) => {
-  try {
-    const userId = (req as any).user?.id;
-    const sessionId = req.params.id;
-
-    // Verify session belongs to user
-    const session = await prisma.chatSession.findFirst({
-      where: { id: sessionId, userId },
-    });
-
-    if (!session) {
-      return res.status(404).json({ error: 'Session not found' });
-    }
-
-    // Get all unique branches with counts
-    const branches = await prisma.uISnapshot.groupBy({
-      by: ['branchName'],
-      where: { sessionId },
-      _count: { id: true },
-      _max: { createdAt: true },
-    });
-
-    // Get fork points (messages that have multiple child snapshots on different branches)
-    const forkPoints = await prisma.$queryRaw`
-      SELECT DISTINCT s1.message_id, s1.branch_name as from_branch, s2.branch_name as to_branch
-      FROM ui_snapshots s1
-      JOIN ui_snapshots s2 ON s1.message_id = s2.message_id 
-      WHERE s1.session_id = ${sessionId} 
-        AND s2.session_id = ${sessionId}
-        AND s1.branch_name != s2.branch_name
-    ` as any[];
-
-    const result = branches.map(b => ({
-      name: b.branchName,
-      snapshotCount: b._count.id,
-      lastUpdate: b._max.createdAt,
-      isActive: b.branchName === 'main', // main is always active
-    }));
-
-    res.json({ branches: result, forkPoints });
-  } catch (error) {
-    console.error('Get branches error:', error);
-    res.status(500).json({ error: 'Failed to get branches' });
-  }
-});
-
-/**
- * PATCH /api/chat/sessions/:id/ui-snapshots/bulk
- * Update multiple snapshots (used for marking old branch as inactive when forking)
- */
-router.patch('/sessions/:id/ui-snapshots/bulk', requireAuth as any, async (req: Request, res: Response) => {
-  try {
-    const userId = (req as any).user?.id;
-    const sessionId = req.params.id;
-    const { snapshotIds, isActive } = req.body;
-
-    if (!Array.isArray(snapshotIds) || typeof isActive !== 'boolean') {
-      return res.status(400).json({ error: 'snapshotIds (array) and isActive (boolean) are required' });
-    }
-
-    // Verify session belongs to user
-    const session = await prisma.chatSession.findFirst({
-      where: { id: sessionId, userId },
-    });
-
-    if (!session) {
-      return res.status(404).json({ error: 'Session not found' });
-    }
-
-    // Update snapshots
-    const result = await prisma.uISnapshot.updateMany({
-      where: {
-        id: { in: snapshotIds },
-        sessionId, // Security: ensure snapshots belong to this session
-      },
-      data: { isActive },
-    });
-
-    res.json({ updated: result.count });
-  } catch (error) {
-    console.error('Bulk update UI snapshots error:', error);
-    res.status(500).json({ error: 'Failed to update UI snapshots' });
-  }
-});
-
-/**
- * DELETE /api/chat/sessions/:id/ui-snapshots/:snapshotId
- * Delete a specific UI snapshot (used for cleanup)
- */
-router.delete('/sessions/:id/ui-snapshots/:snapshotId', requireAuth as any, async (req: Request, res: Response) => {
-  try {
-    const userId = (req as any).user?.id;
-    const { id: sessionId, snapshotId } = req.params;
-
-    // Verify session belongs to user
-    const session = await prisma.chatSession.findFirst({
-      where: { id: sessionId, userId },
-    });
-
-    if (!session) {
-      return res.status(404).json({ error: 'Session not found' });
-    }
-
-    // Delete snapshot
-    await prisma.uISnapshot.delete({
-      where: {
-        id: snapshotId,
-        sessionId, // Security: ensure snapshot belongs to this session
-      },
-    });
-
-    res.json({ success: true });
-  } catch (error) {
-    console.error('Delete UI snapshot error:', error);
-    res.status(500).json({ error: 'Failed to delete UI snapshot' });
   }
 });
 
