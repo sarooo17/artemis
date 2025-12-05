@@ -1,10 +1,9 @@
 import { Router, Request, Response } from 'express';
 import { prisma } from '../config/database';
-import { fluentisService } from '../services/fluentis.service';
+import { writeActionService } from '../services/write-action.service';
 import { validateBody } from '../middleware/validation.middleware';
 import { 
   ExecuteActionSchema, 
-  validateActionPayload,
   type ExecuteActionInput 
 } from '../validators/action.validators';
 
@@ -39,57 +38,25 @@ router.post('/execute', validateBody(ExecuteActionSchema), async (req: Request, 
   });
 
   try {
-    // Validate payload based on action type
-    const validatedPayload = validateActionPayload(actionType, payload);
-
-    // Inject context into payload
-    const payloadWithContext = {
-      ...validatedPayload,
+    // Execute action using WriteActionService
+    const result = await writeActionService.execute(actionType, payload, {
       context,
-    };
+      validateOnly: false,
+      updateExisting: actionType.includes('update'),
+      ignoreWarnings: false,
+    });
 
-    // Execute action based on type
-    let result: any;
-    let entityId: string | undefined;
-
-    switch (actionType) {
-      case 'create_sales_order':
-        result = await fluentisService.createSalesOrder(payloadWithContext);
-        entityId = extractEntityId(result, 'OrderId');
-        break;
-
-      case 'validate_sales_order':
-        result = await fluentisService.validateSalesOrder(payloadWithContext);
-        break;
-
-      case 'create_customer':
-        result = await fluentisService.createCustomer(payloadWithContext);
-        entityId = payloadWithContext.customerId;
-        break;
-
-      case 'update_customer':
-        result = await fluentisService.updateCustomer(payloadWithContext);
-        entityId = payloadWithContext.customerId;
-        break;
-
-      case 'create_item':
-        result = await fluentisService.createItem(payloadWithContext);
-        entityId = payloadWithContext.itemCode;
-        break;
-
-      case 'update_stock':
-        result = await fluentisService.updateStock(payloadWithContext);
-        entityId = payloadWithContext.itemCode;
-        break;
-
-      default:
-        throw new Error(`Unsupported action type: ${actionType}`);
+    // Check if action succeeded
+    if (!result.success) {
+      // Handle validation errors differently from execution errors
+      if (result.validationErrors) {
+        throw new Error(`Validation failed: ${result.validationErrors.map(e => e.message).join(', ')}`);
+      }
+      throw new Error(result.error || 'Action execution failed');
     }
 
-    // Check if Fluentis operation succeeded
-    if (!result.Success) {
-      throw new Error(result.ErrorMessage || 'Fluentis operation failed');
-    }
+    // Extract entity ID from result
+    const entityId = extractEntityId(result.data, actionType);
 
     // Update action log with success
     const executionTimeMs = Date.now() - startTime;
@@ -106,22 +73,45 @@ router.post('/execute', validateBody(ExecuteActionSchema), async (req: Request, 
 
     console.log(`✅ Action ${actionType} executed successfully in ${executionTimeMs}ms`);
 
+    // Generate LLM-friendly message for frontend
+    const actionLabels: Record<string, string> = {
+      'create_customer': 'Cliente creato',
+      'update_customer': 'Cliente aggiornato',
+      'create_sales_order': 'Ordine di vendita creato',
+      'create_purchase_order': 'Ordine di acquisto creato',
+      'create_item': 'Articolo creato',
+      'update_stock': 'Stock aggiornato',
+      'create_payment': 'Pagamento registrato',
+    };
+    
+    const actionLabel = actionLabels[actionType] || 'Operazione completata';
+    const llmMessage = entityId 
+      ? `${actionLabel} con ID ${entityId}.`
+      : `${actionLabel} con successo.`;
+
     // Return success response
     res.status(200).json({
       success: true,
       actionId: actionLog.id,
       entityId,
+      llmMessage, // ✅ Add LLM-friendly message for confirmation UI
       result: {
-        success: result.Success,
-        message: result.Message || 'Operation completed successfully',
-        warnings: result.Warnings,
-        validationErrors: result.ValidationErrors,
+        success: true,
+        message: 'Operation completed successfully',
+        data: result.data,
       },
       executionTimeMs,
     });
 
   } catch (error: any) {
     const executionTimeMs = Date.now() - startTime;
+    
+    // Check if this is a validation error (missing/invalid data)
+    const isValidationError = 
+      error.message?.includes('Validation failed') ||
+      error.message?.includes('required') ||
+      error.message?.includes('invalid') ||
+      error.message?.includes('missing');
     
     // Update action log with failure
     await prisma.actionLog.update({
@@ -142,6 +132,9 @@ router.post('/execute', validateBody(ExecuteActionSchema), async (req: Request, 
       actionId: actionLog.id,
       error: error.message,
       executionTimeMs,
+      // Flag to regenerate form with errors for validation issues
+      editableForm: isValidationError,
+      validationErrors: isValidationError ? error.message : undefined,
     });
   }
 });
@@ -236,16 +229,25 @@ function extractEntityType(actionType: string): string {
 }
 
 /**
- * Extract entity ID from Fluentis response
+ * Extract entity ID from action result
  */
-function extractEntityId(result: any, idField: string): string | undefined {
-  if (result.ImportedObjects && result.ImportedObjects.length > 0) {
-    return result.ImportedObjects[0][idField];
+function extractEntityId(data: any, actionType: string): string | undefined {
+  if (!data) return undefined;
+  
+  // Try standard Fluentis response structures
+  if (data.ImportedObjects && data.ImportedObjects.length > 0) {
+    const obj = data.ImportedObjects[0];
+    // Try common ID fields
+    return obj.OrderId || obj.CustomerId || obj.ItemCode || obj.Id;
   }
-  if (result.Data && result.Data[idField]) {
-    return result.Data[idField];
+  
+  // Try direct data fields
+  if (data.Data) {
+    return data.Data.OrderId || data.Data.CustomerId || data.Data.ItemCode || data.Data.Id;
   }
-  return undefined;
+  
+  // Try top-level fields
+  return data.OrderId || data.CustomerId || data.ItemCode || data.Id;
 }
 
 export default router;

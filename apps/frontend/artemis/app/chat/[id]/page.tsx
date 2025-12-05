@@ -9,6 +9,8 @@ import { useAuth } from "@/contexts/AuthContext";
 import C1Renderer from "@/components/C1Renderer";
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { Toast } from '@/components/Toast';
+import { useToast } from '@/hooks/useToast';
 import "@crayonai/react-ui/styles/index.css";
 
 type AIResponseBarState = "thinking" | "preview" | "expanded" | "full" | "button" | "hidden";
@@ -33,6 +35,67 @@ interface UISnapshot {
   metadata: Record<string, any> | null;
   isActive: boolean;
   createdAt: string;
+}
+
+/**
+ * Map C1-generated field names to backend schema field names
+ * C1 invents its own field names, we need to translate them
+ */
+function mapFormFieldNames(actionType: string, formData: Record<string, any>): Record<string, any> {
+  const mappings: Record<string, Record<string, string>> = {
+    'create_customer': {
+      'company_name': 'companyName',
+      'companyname': 'companyName',
+      'customer_name': 'companyName',
+      'name': 'companyName',
+      'vat_number': 'vatNumber',
+      'vatnumber': 'vatNumber',
+      'tax_code': 'taxCode',
+      'taxcode': 'taxCode',
+      'fiscal_code': 'taxCode',
+      'postal_code': 'postalCode',
+      'postalcode': 'postalCode',
+      'zip_code': 'postalCode',
+      'zip': 'postalCode',
+      'phone_number': 'phone',
+      'phonenumber': 'phone',
+      'telephone': 'phone',
+      'customer_type': 'customerCategory',
+      'customer_category': 'customerCategory',
+    },
+    'update_customer': {
+      'company_name': 'companyName',
+      'customer_id': 'customerId',
+      'customer_category': 'customerCategory',
+      'tax_code': 'taxCode',
+      'postal_code': 'postalCode',
+      'phone_number': 'phone',
+      'vat_number': 'vatNumber',
+    },
+    // Add mappings for other actions as needed
+  };
+
+  const actionMapping = mappings[actionType] || {};
+  const mapped: Record<string, any> = {};
+
+  for (const [key, value] of Object.entries(formData)) {
+    const mappedKey = actionMapping[key.toLowerCase()] || key;
+    mapped[mappedKey] = value;
+  }
+
+  // ✅ Post-processing: Add required fields that might be missing
+  if (actionType === 'create_customer') {
+    // Generate customerId if missing (required by schema)
+    if (!mapped.customerId) {
+      // Generate a unique ID based on company name
+      const companyName = mapped.companyName || 'CUSTOMER';
+      const timestamp = Date.now().toString(36);
+      const random = Math.random().toString(36).substring(2, 5).toUpperCase();
+      mapped.customerId = `${companyName.substring(0, 4).toUpperCase()}-${timestamp}-${random}`;
+    }
+  }
+
+  return mapped;
 }
 
 function ChatPageContent() {
@@ -71,6 +134,9 @@ function ChatPageContent() {
   const abortControllerRef = useRef<AbortController | null>(null);
   const thinkingIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const userInteractedRef = useRef(false);
+  
+  // Toast notifications
+  const { toasts, removeToast, success: showSuccess, error: showError } = useToast();
 
   // Auto-hide timer management
   const startAutoHideTimer = () => {
@@ -261,27 +327,26 @@ function ChatPageContent() {
 
   // ====== ACTION EXECUTION ======
   
+  // State for pending action confirmation
+  const [pendingAction, setPendingAction] = useState<{
+    actionType: string;
+    payload: Record<string, any>;
+    humanMessage: string;
+    llmMessage: string;
+  } | null>(null);
+
   /**
-   * Execute a write action on Fluentis ERP
+   * Execute a write action on Fluentis ERP (actual execution, no confirmation)
    */
-  const executeAction = async (
+  const executeActionDirect = async (
     actionType: string,
     payload: Record<string, any>,
     options?: {
-      confirmMessage?: string;
       successMessage?: string;
       errorMessage?: string;
     }
-  ): Promise<{ success: boolean; result?: any; error?: string }> => {
+  ): Promise<{ success: boolean; result?: any; error?: string; llmMessage?: string; editableForm?: boolean }> => {
     try {
-      // Show confirmation dialog for write operations
-      if (options?.confirmMessage) {
-        const confirmed = window.confirm(options.confirmMessage);
-        if (!confirmed) {
-          return { success: false, error: 'Action cancelled by user' };
-        }
-      }
-
       // Show loading state
       console.log(`⚡ Executing action: ${actionType}`, payload);
 
@@ -298,26 +363,18 @@ function ChatPageContent() {
         // Success notification
         const message = options?.successMessage || `Action ${actionType} completed successfully`;
         console.log(`✅ ${message}`, data);
-        
-        // Simple alert for now (can be replaced with toast library)
-        if (options?.successMessage) {
-          alert(`✅ ${options.successMessage}`);
-        }
 
-        return { success: true, result: data.result };
+        return { success: true, result: data.result, llmMessage: data.llmMessage };
       } else {
         // Error notification
         const errorMsg = data.error || options?.errorMessage || `Action ${actionType} failed`;
         console.error(`❌ ${errorMsg}`, data);
         
-        alert(`❌ ${errorMsg}`);
-        
-        return { success: false, error: errorMsg };
+        return { success: false, error: errorMsg, editableForm: data.editableForm };
       }
     } catch (error: any) {
       console.error('Action execution error:', error);
       const errorMsg = error.message || 'Network error executing action';
-      alert(`❌ ${errorMsg}`);
       return { success: false, error: errorMsg };
     }
   };
@@ -337,6 +394,64 @@ function ChatPageContent() {
     const actionType = event.type || 'unknown';
     const payload = event.params || {};
 
+    // ✅ SPECIAL CASE: continue_conversation from form submit
+    // When user submits a form, C1 sends continue_conversation with form data
+    // We need to intercept this and show confirmation dialog
+    if (actionType === 'continue_conversation' && event.llmFriendlyMessage) {
+      const isFormSubmit = event.llmFriendlyMessage.toLowerCase().includes('user clicked on button: submit');
+      
+      if (isFormSubmit) {
+        console.log('📝 Form submit detected, showing confirmation dialog');
+        
+        // Try to detect which action based on form name
+        const formNameMatch = event.llmFriendlyMessage.match(/new[_-]customer[_-]form/i);
+        const detectedAction = formNameMatch ? 'create_customer' : 'unknown_action';
+        
+        // Extract form data from llmFriendlyMessage context
+        // The message format is: <content>...</content><context>[...form data...]</context>
+        const contextMatch = event.llmFriendlyMessage.match(/<context>\[(.*?)\]<\/context>/);
+        let formData: Record<string, any> = {};
+        
+        if (contextMatch) {
+          try {
+            // Parse the context JSON (it's escaped)
+            const contextStr = contextMatch[1].replace(/&quot;/g, '"');
+            const contextArray = JSON.parse(`[${contextStr}]`);
+            
+            // Extract form values from context
+            if (contextArray.length > 1 && contextArray[1] && contextArray[1][0]) {
+              const formObject = contextArray[1][0];
+              const formKey = Object.keys(formObject)[0]; // e.g., "new_customer_form"
+              const fields = formObject[formKey];
+              
+              // Convert C1 format to flat object
+              for (const [key, field] of Object.entries(fields as Record<string, any>)) {
+                formData[key] = field.value;
+              }
+            }
+          } catch (e) {
+            console.error('Failed to parse form data:', e);
+          }
+        }
+        
+        console.log('📋 Extracted form data (raw):', formData);
+        
+        // ✅ Map C1 field names to backend field names
+        const mappedFormData = mapFormFieldNames(detectedAction, formData);
+        console.log('📋 Mapped form data:', mappedFormData);
+        
+        // Show confirmation dialog
+        setPendingAction({
+          actionType: detectedAction,
+          payload: mappedFormData,
+          humanMessage: event.humanFriendlyMessage || 'Conferma operazione?',
+          llmMessage: event.llmFriendlyMessage || '',
+        });
+        
+        return;
+      }
+    }
+    
     // Filter out non-action events (like continue_conversation, navigation, etc.)
     const nonActionTypes = ['continue_conversation', 'navigate', 'refresh', 'close', 'unknown'];
     if (nonActionTypes.includes(actionType)) {
@@ -351,25 +466,91 @@ function ChatPageContent() {
     // Map C1 action types to backend action types
     const actionTypeMap: Record<string, string> = {
       'create_order': 'create_sales_order',
+      'create_sales_order': 'create_sales_order',
       'create_customer': 'create_customer',
       'update_customer': 'update_customer',
       'create_item': 'create_item',
       'update_stock': 'update_stock',
+      'create_purchase_order': 'create_purchase_order',
+      'create_payment': 'create_payment',
     };
 
     const backendActionType = actionTypeMap[actionType] || actionType;
 
-    // Execute action with confirmation
-    const result = await executeAction(backendActionType, payload, {
-      confirmMessage: event.humanFriendlyMessage || `Execute: ${actionType}?`,
+    // Set pending action for confirmation (Opzione B - inline chat confirmation)
+    setPendingAction({
+      actionType: backendActionType,
+      payload,
+      humanMessage: event.humanFriendlyMessage || `Execute: ${actionType}?`,
+      llmMessage: event.llmFriendlyMessage || '',
+    });
+  };
+
+  /**
+   * Confirm and execute pending action
+   */
+  const confirmPendingAction = async () => {
+    if (!pendingAction) return;
+
+    const { actionType, payload } = pendingAction;
+    setPendingAction(null); // Clear pending
+
+    // Execute action
+    const result = await executeActionDirect(actionType, payload, {
       successMessage: `Operation completed: ${actionType}`,
       errorMessage: `Error executing: ${actionType}`,
     });
 
-    // Send LLM-friendly message to chat if successful
-    if (result.success && event.llmFriendlyMessage) {
-      await sendMessageWithText(event.llmFriendlyMessage);
+    // Show toast notification
+    if (result.success) {
+      showSuccess('✅ Operazione completata con successo!');
+    } else {
+      const errorMsg = (result as any).editableForm 
+        ? 'Errori di validazione, correggi i dati'
+        : result.error || 'Errore durante l\'esecuzione';
+      showError(`❌ ${errorMsg}`);
     }
+
+    // Send LLM-friendly message to chat if successful
+    if (result.success) {
+      // Get LLM message from backend response
+      const llmMessage = result.llmMessage || 'Operazione completata con successo.';
+      console.log('📩 LLM Message from backend:', llmMessage);
+      
+      // Build enriched message asking AI to generate confirmation UI
+      const confirmationPrompt = `${llmMessage}
+
+Mostra una UI di conferma con:
+- Card/riepilogo dell'operazione appena completata
+- Dettagli dell'entità creata/modificata
+- (Opzionale) Suggerimenti per azioni successive correlate
+- (Opzionale) Tabella con entità simili aggiornata
+
+Usa responseFormat='ui' per generare una visualizzazione professionale e informativa.`;
+      
+      // Send to AI - will generate new UI replacing the form
+      await sendMessageWithText(confirmationPrompt);
+    } else if (!result.success) {
+      // Check if this is a validation error that needs form regeneration
+      if ((result as any).editableForm) {
+        // Validation error - ask AI to regenerate form with error feedback
+        const errorMsg = (result as any).validationErrors || result.error || 'Validation failed';
+        const fixPrompt = `La precedente operazione è fallita per errori di validazione: ${errorMsg}. Per favore correggi i dati e riprova.`;
+        await sendMessageWithText(fixPrompt);
+      } else {
+        // Other errors - just show error message
+        const errorMsg = result.error || 'Action failed';
+        setCurrentAiResponse(`❌ ${errorMsg}`);
+        setAiBarState('preview');
+      }
+    }
+  };
+
+  /**
+   * Cancel pending action
+   */
+  const cancelPendingAction = () => {
+    setPendingAction(null);
   };
 
   // Core send message logic - accepts message text directly
@@ -893,6 +1074,9 @@ function ChatPageContent() {
 
   return (
     <div className="w-screen h-screen bg-white gap-2 flex">
+      {/* Toast Notifications */}
+      <Toast toasts={toasts} onRemove={removeToast} />
+      
       <Navbar />
 
       {/* WORKSPACE Container - takes full space for generative UI */}
@@ -1132,6 +1316,40 @@ function ChatPageContent() {
               {aiBarState === "preview" && currentAiResponse.length > 200 && (
                 <div className="absolute bottom-0 left-0 right-0 h-6 bg-linear-to-t from-white to-transparent pointer-events-none rounded-b-[26px]" />
               )}
+            </div>
+          </div>
+        )}
+
+        {/* Action Confirmation Dialog - Inline Chat Style (Opzione B) */}
+        {pendingAction && (
+          <div className="absolute bottom-28 left-1/2 -translate-x-1/2 w-full max-w-3xl px-8 z-50">
+            <div className="bg-white rounded-2xl shadow-2xl border-2 border-blue-200 p-6 space-y-4">
+              <div className="flex items-start gap-3">
+                <div className="shrink-0 w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center">
+                  <svg className="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                </div>
+                <div className="flex-1">
+                  <h3 className="text-base font-semibold text-neutral-900 mb-1">Conferma operazione</h3>
+                  <p className="text-sm text-neutral-700">{pendingAction.humanMessage}</p>
+                </div>
+              </div>
+              
+              <div className="flex items-center gap-3 justify-end">
+                <button
+                  onClick={cancelPendingAction}
+                  className="px-4 py-2 rounded-lg text-sm font-medium text-neutral-700 hover:bg-neutral-100 transition-colors"
+                >
+                  Annulla
+                </button>
+                <button
+                  onClick={confirmPendingAction}
+                  className="px-4 py-2 rounded-lg text-sm font-medium text-white bg-blue-500 hover:bg-blue-600 transition-colors"
+                >
+                  Conferma
+                </button>
+              </div>
             </div>
           </div>
         )}

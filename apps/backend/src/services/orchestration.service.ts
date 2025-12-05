@@ -211,22 +211,51 @@ You MUST respond with structured JSON:
   * {actionType, title, description, prefillData}
 - thinking: (optional) Your reasoning for transparency
 
-## Write Operations (CRITICAL)
+## Write Operations (CRITICAL - NEW SYSTEM)
 When user wants to CREATE, ADD, UPDATE, or MODIFY data:
-1. **ALWAYS** set responseFormat='form' (not 'ui' or 'text')
-2. Specify formSpec with actionType (from: create_sales_order, create_customer, update_customer, create_item, update_stock)
-3. Include prefillData if you can infer values from context
-4. Backend will generate form → user fills → validates → executes
+1. **ALWAYS** set responseFormat='ui' (C1 will generate the form)
+2. Include apiCalls to prefetch data for smart prefill (e.g., customer info if mentioned)
+3. Backend will pass custom actions to C1 → C1 generates form → user submits → confirms → executes
 
-Examples that require 'form':
-- "Create new order" → responseFormat='form', actionType='create_sales_order'
-- "Add new customer" → responseFormat='form', actionType='create_customer'
-- "New article/item" → responseFormat='form', actionType='create_item'
-- "Update stock" → responseFormat='form', actionType='update_stock'
-- "Modify customer info" → responseFormat='form', actionType='update_customer'
-- User clicks "Nuovo Articolo" button → responseFormat='form', actionType='create_item'
+### Available Write Actions:
+- **create_sales_order**: Create new sales order (needs: customerId, items[])
+- **create_customer**: Create new customer (needs: name, address, city, postalCode, country)
+- **update_customer**: Update existing customer (needs: customerId, updates{})
+- **create_purchase_order**: Create purchase order (needs: supplierId, items[])
+- **create_item**: Create new item (needs: description, type, unit)
+- **update_stock**: Adjust stock levels (needs: itemId, warehouse, quantity, movementType)
+- **create_payment**: Register payment (needs: amount, paymentDate, paymentMethod)
 
-DO NOT use responseFormat='ui' or 'text' for write operations!
+### Smart Prefill Intelligence:
+If user mentions entities, fetch them FIRST:
+- "Create order for ABC" → Call get_customer_by_code with code='ABC' to prefill customer data
+- "Create order with item X" → Call get_items with filter for item X to prefill item data + price
+- "Update customer Rossi" → Call get_customer to prefetch current data
+- Conversation history: If customer/item mentioned in previous messages, fetch it for prefill
+
+### Examples of Write Intent Detection:
+- "Create new order" → responseFormat='ui', apiCalls=[{apiId:'get_customers'}] for prefill suggestions
+- "Add order for customer ABC" → responseFormat='ui', apiCalls=[{apiId:'get_customer_by_code', parameters:{customerCode:'ABC'}}]
+- "New customer" → responseFormat='ui' (no apiCalls needed, empty form)
+- "Create order: customer X, item Y qty 5" → apiCalls=[get_customer for X, get_items for Y], responseFormat='ui'
+- "Update stock" → responseFormat='ui', apiCalls=[{apiId:'get_items'}] to show item list
+- User says "Yes, create the order" after form → This is CONFIRMATION, send as user message
+
+### Post-Action Confirmation UI:
+When user confirms action execution (message contains "Cliente creato con ID..." or similar success message):
+1. **ALWAYS use responseFormat='ui'** to show confirmation
+2. Generate professional confirmation UI with:
+   - ✅ Success card/banner with operation summary
+   - 📊 Details card showing created/updated entity data
+   - 🔗 Suggested next actions (e.g., "Create order for this customer", "View all customers")
+   - 📋 (Optional) Updated table/list of related entities
+3. Examples:
+   - "Cliente creato con ID CUST123" → UI with customer card + "View all customers" table + "Create order" button
+   - "Ordine creato con numero SO-456" → UI with order summary card + order items table + "Create delivery note" action
+   - "Stock aggiornato per item X" → UI with stock movements card + current stock levels table
+4. Make the UI informative, actionable, and visually clear
+
+CRITICAL: Use responseFormat='ui' for write operations AND post-action confirmations, NOT 'form'!
 ${uiModificationGuidelines}`;
 
     if (!context) {
@@ -336,6 +365,46 @@ ${uiModificationGuidelines}`;
   ): Promise<OrchestrationResult> {
     const { conversationHistory = [], context, currentUIContent } = options;
 
+    // ===== CONVERSATIONAL CONFIRMATION DETECTION =====
+    // Check if user is confirming a pending action
+    const confirmationKeywords = [
+      'sì', 'si', 'yes', 'conferma', 'confirm', 'procedi', 'proceed', 
+      'go ahead', 'ok', 'okay', 'va bene', 'fallo', 'do it', 'esegui', 'execute'
+    ];
+    const userPromptLower = userPrompt.toLowerCase().trim();
+    const isConfirmation = confirmationKeywords.some(keyword => 
+      userPromptLower === keyword || userPromptLower.startsWith(keyword + ' ') || userPromptLower.startsWith(keyword + ',')
+    );
+
+    if (isConfirmation && conversationHistory.length > 0) {
+      // Check if last assistant message was a form (contains form UI)
+      const lastAssistantMsg = conversationHistory.slice().reverse().find(
+        (msg: any) => msg.role === 'assistant'
+      );
+      
+      if (lastAssistantMsg?.content && typeof lastAssistantMsg.content === 'string') {
+        // Check if it contains form-like content (C1 DSL indicators)
+        const hasFormIndicators = 
+          lastAssistantMsg.content.includes('```form') ||
+          lastAssistantMsg.content.includes('Form:') ||
+          lastAssistantMsg.content.includes('create_') ||
+          lastAssistantMsg.content.includes('update_');
+        
+        if (hasFormIndicators) {
+          console.log('✅ Conversational confirmation detected! User confirmed action.');
+          // Return a simple text response acknowledging confirmation
+          // Frontend will handle actual execution via handleC1Action
+          return {
+            type: 'text',
+            content: 'Confermato! Procedo con l\'operazione...',
+            layoutIntent: 'preview',
+            thinking: 'User confirmed the action via conversational response',
+            data: null,
+          };
+        }
+      }
+    }
+
     // Build messages with context-aware system prompt
     const messages: Message[] = [
       {
@@ -412,7 +481,32 @@ ${uiModificationGuidelines}`;
         // UI MODE: C1 generates UI with batch tools + OpenAI generates summary
         console.log('🎨 UI generation mode');
         
-        // Step 3a: C1 generates UI with batch tool execution
+        // Step 3a: Check if this is a write operation and prepare custom actions
+        let customActions: any = undefined;
+        
+        // Detect write intent by checking for write-related keywords in user prompt or guidelines
+        const writeKeywords = ['create', 'add', 'new', 'update', 'modify', 'edit', 'register', 'insert'];
+        const userPromptLower = userPrompt.toLowerCase();
+        const hasWriteIntent = writeKeywords.some(keyword => userPromptLower.includes(keyword));
+        
+        if (hasWriteIntent) {
+          console.log('[UI Mode] Write intent detected, preparing custom actions...');
+          const { WRITE_ACTIONS, getAllActionsAsJsonSchema } = await import('../config/write-actions-catalog');
+          
+          // Convert WRITE_ACTIONS to C1-compatible format
+          customActions = {};
+          for (const action of WRITE_ACTIONS) {
+            const { zodToJsonSchema } = await import('zod-to-json-schema');
+            customActions[action.name] = zodToJsonSchema(action.schema, {
+              name: action.name,
+              $refStrategy: 'none',
+            });
+          }
+          
+          console.log('[UI Mode] Custom actions prepared:', Object.keys(customActions));
+        }
+        
+        // Step 3b: C1 generates UI with batch tool execution + custom actions
         console.log('[UI Mode] Step 1: C1 generating UI with tools...');
         const { C1_TOOLS } = await import('../config/tools-catalog');
         
@@ -427,7 +521,8 @@ ${uiModificationGuidelines}`;
           C1_TOOLS,
           context,
           conversationHistory,
-          currentUIContent
+          currentUIContent,
+          customActions
         );
         
         // Step 3b: OpenAI generates summary SEEING the generated UI
@@ -640,6 +735,18 @@ ${uiModificationGuidelines}`;
             break;
           case 'update_stock':
             result = await fluentisService.updateStock({ ...p, context });
+            break;
+          case 'import_contacts':
+            // Generic import for contacts using Fluentis import method
+            result = await fluentisService.import(
+              'SH/Common',
+              'ImportContacts',
+              p.data || p,
+              { context, updateExisting: true }
+            );
+            break;
+          case 'export_contacts':
+            result = await fluentisService.exportContacts({ ...p, context });
             break;
           default:
             throw new Error(`API ${apiCall.apiId} not yet implemented`);
@@ -881,6 +988,28 @@ ${uiModificationGuidelines}`;
     if (!hasExistingUI) return 'NEW';
     
     const prompt = userPrompt.toLowerCase();
+    console.log('[UI Intent] Analyzing prompt:', prompt.substring(0, 200));
+    
+    // ✅ FIX: Detect post-action confirmation messages → Always use NEW
+    // These messages come from frontend after successful action execution
+    const postActionKeywords = [
+      'creato con id',
+      'created with id',
+      'aggiornato con successo',
+      'updated successfully',
+      'eliminato con successo',
+      'deleted successfully',
+      'operazione completata',
+      'operation completed',
+      'mostra una ui di conferma', // From enriched confirmation prompt
+      'show confirmation ui',
+      'conferma con:',
+    ];
+    
+    if (postActionKeywords.some(kw => prompt.includes(kw))) {
+      console.log('[UI Intent] Post-action confirmation detected → NEW');
+      return 'NEW';
+    }
     
     // Keywords for different intents
     const replaceKeywords = ['ricrea', 'restart', 'nuovo', 'da zero', 'ricomincia', 'cancella tutto', 'reset'];

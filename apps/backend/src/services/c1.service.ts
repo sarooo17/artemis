@@ -756,7 +756,8 @@ Generate complete interactive forms with ALL necessary components.
     tools: any[],
     context?: any,
     conversationHistory?: any[],
-    currentUIContent?: string
+    currentUIContent?: string,
+    customActions?: any
   ): Promise<string> {
     const messages: any[] = [
       {
@@ -810,12 +811,24 @@ ${conversationHistory.slice(-3).map((m: any) => `${m.role}: ${m.content?.substri
       console.log('[C1] Step 1: Calling C1 with tools...');
       
       // STEP 1: C1 decides which tools to use
-      const response = await this.client.chat.completions.create({
+      const createParams: any = {
         model: this.defaultModel,
         messages: messages,
         tools: tools,
         tool_choice: 'auto' as any
-      });
+      };
+
+      // Add custom actions metadata if provided (for write operations)
+      if (customActions) {
+        createParams.metadata = {
+          thesys: JSON.stringify({
+            c1_custom_actions: customActions
+          })
+        };
+        console.log('[C1] Custom actions added to metadata:', Object.keys(customActions));
+      }
+
+      const response = await this.client.chat.completions.create(createParams);
 
       const message = response.choices[0]?.message;
 
@@ -858,10 +871,21 @@ ${conversationHistory.slice(-3).map((m: any) => `${m.role}: ${m.content?.substri
         messages.push(...toolResults);
 
         // STEP 4: C1 generates final UI with all tool results
-        const finalResponse = await this.client.chat.completions.create({
+        const finalParams: any = {
           model: this.defaultModel,
           messages: messages
-        });
+        };
+
+        // Add custom actions metadata again for final response
+        if (customActions) {
+          finalParams.metadata = {
+            thesys: JSON.stringify({
+              c1_custom_actions: customActions
+            })
+          };
+        }
+
+        const finalResponse = await this.client.chat.completions.create(finalParams);
 
         const finalContent = finalResponse.choices[0]?.message?.content || '';
         console.log('[C1] Step 4: UI generated successfully with tools');

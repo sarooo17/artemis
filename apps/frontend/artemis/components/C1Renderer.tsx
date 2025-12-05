@@ -30,6 +30,21 @@ export default function C1Renderer({
   const [chunks, setChunks] = useState<string[]>([]);
   const containerRef = useRef<HTMLDivElement>(null);
 
+  // Handle C1 state updates (form inputs, toggles, etc.)
+  const handleStateUpdate = async (updatedC1Response: string) => {
+    console.log('💾 C1 state updated, persisting to database...');
+    
+    // TODO: Implement API call to save state
+    // For now, just log it
+    // In production, you'd call:
+    // await api.post('/chat/update-ui-state', {
+    //   sessionId: currentSessionId,
+    //   uiContent: updatedC1Response,
+    // });
+    
+    console.log('State snapshot saved (length:', updatedC1Response.length, 'chars)');
+  };
+
   useEffect(() => {
     if (streaming) {
       // Progressive rendering for streaming

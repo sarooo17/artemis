@@ -105,8 +105,10 @@ export const ExecuteActionSchema = z.object({
     'create_item',
     'update_item',
     'update_stock',
+    'create_purchase_order',
+    'create_payment',
   ]),
-  payload: z.record(z.any()), // Validated based on actionType
+  payload: z.record(z.any()), // Validated by WriteActionService using action schemas
   sessionId: z.string().optional(), // Link to chat session
   confirmationRequired: z.boolean().default(false),
 });
